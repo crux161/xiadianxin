@@ -86,6 +86,7 @@ export interface FileTransferProgress {
   byteSize: number;
   totalSize: number;
   received: number;
+  kind?: "file" | "voicemail";
   sha256?: string;
   verified?: boolean;
   error?: string;
@@ -129,14 +130,34 @@ export type SignalMessage =
       timestamp: number;
     }
   | { type: "typing"; displayName: string }
-  | { type: "hello"; callingCode: string; displayName: string }
-  | { type: "friend-request"; callingCode: string; displayName: string }
-  | { type: "friend-accept"; callingCode: string; displayName: string }
+  | {
+      type: "hello";
+      callingCode: string;
+      displayName: string;
+      avatarId?: string;
+      publicKey?: string;
+    }
+  | {
+      type: "friend-request";
+      callingCode: string;
+      displayName: string;
+      avatarId?: string;
+    }
+  | {
+      type: "friend-accept";
+      callingCode: string;
+      displayName: string;
+      avatarId?: string;
+      publicKey?: string;
+    }
   | {
       type: "file-offer";
       fileId: string;
       fileName: string;
       fileSize: number;
+      fromCode?: string;
+      kind?: "file" | "voicemail";
+      voicemailAuth?: string;
       totalChunks?: number;
       sha256?: string;
     }

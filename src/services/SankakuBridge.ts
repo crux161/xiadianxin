@@ -247,8 +247,18 @@ class SankakuBridge {
     return invoke<Friend[]>("get_friends");
   }
 
-  async addFriend(callingCode: string, displayName: string): Promise<Friend> {
-    return invoke<Friend>("add_friend", { callingCode, displayName });
+  async addFriend(
+    callingCode: string,
+    displayName: string,
+    avatarId?: string,
+    publicKey?: string,
+  ): Promise<Friend> {
+    return invoke<Friend>("add_friend", {
+      callingCode,
+      displayName,
+      avatarId,
+      publicKey,
+    });
   }
 
   async removeFriend(callingCode: string): Promise<void> {

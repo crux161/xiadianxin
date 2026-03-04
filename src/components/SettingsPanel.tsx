@@ -36,9 +36,18 @@ interface Props {
   profile: UserProfile | null;
   onClose: () => void;
   onProfileChanged: (p: UserProfile) => void;
+  uiScale: number;
+  onUiScaleChange: (value: number) => void;
 }
 
-const SettingsPanel: React.FC<Props> = ({ open, profile, onClose, onProfileChanged }) => {
+const SettingsPanel: React.FC<Props> = ({
+  open,
+  profile,
+  onClose,
+  onProfileChanged,
+  uiScale,
+  onUiScaleChange,
+}) => {
   const { t } = useI18n();
   const [displayName, setDisplayName] = useState("");
   const [avatarId, setAvatarId] = useState("kyu-kun");
@@ -198,6 +207,30 @@ const SettingsPanel: React.FC<Props> = ({ open, profile, onClose, onProfileChang
               <Radio value="en">{t("settings.langEnglish")}</Radio>
               <Radio value="zh">{t("settings.langChinese")}</Radio>
             </RadioGroup>
+          </div>
+
+          {/* UI Scale */}
+          <div className="xdx-settings-section">
+            <Text className="xdx-settings-label">{t("settings.uiScale")}</Text>
+            <div className="xdx-scale-control">
+              <input
+                type="range"
+                min={0.9}
+                max={1.2}
+                step={0.02}
+                value={uiScale}
+                className="xdx-scale-slider"
+                onChange={(e) => onUiScaleChange(Number(e.target.value))}
+              />
+              <div className="xdx-scale-row">
+                <Text size="small" style={{ color: "rgba(255,255,255,0.45)" }}>
+                  {t("settings.uiScaleHint")}
+                </Text>
+                <Text className="xdx-scale-value">
+                  {Math.round(uiScale * 100)}%
+                </Text>
+              </div>
+            </div>
           </div>
 
           {/* About */}

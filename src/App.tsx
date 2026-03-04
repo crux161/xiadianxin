@@ -22,13 +22,14 @@ import {
   IconUserAdd,
 } from "@douyinfe/semi-icons";
 import { open as shellOpen } from "@tauri-apps/plugin-shell";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { I18nProvider, useI18n } from "./i18n/index";
 import SankakuBridge from "./services/SankakuBridge";
 import { WebRTCService } from "./services/WebRTCService";
 import { useMediaDevices } from "./hooks/useMediaDevices";
 import CallView from "./components/CallView";
 import ChatPanel from "./components/ChatPanel";
-import SettingsPanel from "./components/SettingsPanel";
+import SettingsPanel, { AVATAR_MAP } from "./components/SettingsPanel";
 import DialPad from "./components/DialPad";
 import EventCard from "./components/EventCard";
 import {
@@ -46,7 +47,6 @@ import {
   type LocaleCode,
 } from "./types/call";
 
-import foxDefault from "../reference/images/kyu-kun/fox.jpg";
 import foxOk from "../reference/images/kyu-kun/fox-maru-green-OK.jpeg";
 import foxSleeping from "../reference/images/kyu-kun/fox-sleeping.jpeg";
 import foxCelebrate from "../reference/images/kyu-kun/fox-celebrate-recovery.jpeg";
@@ -63,7 +63,7 @@ import "./App.css";
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
-type SidebarTab = "peers" | "dial" | "voicemail" | "downloads";
+type SidebarTab = "peers" | "voicemail" | "downloads";
 
 const IDLE_ART = [
   { src: foxOk, alt: "Kyu-kun" },
@@ -75,6 +75,8 @@ const IDLE_ART = [
 ];
 
 let chatIdCounter = 0;
+const MOBILE_BREAKPOINT = 900;
+
 function nextChatId(): string {
   return `msg-${Date.now()}-${++chatIdCounter}`;
 }
@@ -111,6 +113,24 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
     .join("");
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let raw = "";
+  const BATCH = 8192;
+  for (let i = 0; i < bytes.length; i += BATCH) {
+    const chunk = bytes.subarray(i, i + BATCH);
+    raw += String.fromCharCode(...chunk);
+  }
+  return btoa(raw);
+}
+
+function generateFriendKey(): string {
+  const rand = new Uint8Array(16);
+  crypto.getRandomValues(rand);
+  return Array.from(rand)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 // ---------------------------------------------------------------------------
 // Inner app (wrapped by I18nProvider)
 // ---------------------------------------------------------------------------
@@ -132,8 +152,19 @@ const AppInner: React.FC = () => {
   const [peers, setPeers] = useState<DiscoveredPeer[]>([]);
   const [coreReady, setCoreReady] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("peers");
+  const [dialPadOpen, setDialPadOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
+  const [isMobile, setIsMobile] = useState<boolean>(
+    () => window.innerWidth <= MOBILE_BREAKPOINT,
+  );
+  const [uiScale, setUiScale] = useState<number>(() => {
+    const stored = Number(window.localStorage.getItem("xdx-ui-scale"));
+    if (Number.isFinite(stored) && stored >= 0.9 && stored <= 1.2) {
+      return stored;
+    }
+    return window.innerWidth <= MOBILE_BREAKPOINT ? 1.08 : 1;
+  });
 
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [chatOpen, setChatOpen] = useState(false);
@@ -151,7 +182,10 @@ const AppInner: React.FC = () => {
   const [pendingFriendRequest, setPendingFriendRequest] = useState<{
     callingCode: string;
     displayName: string;
+    avatarId?: string;
+    publicKey?: string;
   } | null>(null);
+  const [customAvatarUrl, setCustomAvatarUrl] = useState<string | null>(null);
   const [fileTransfers, setFileTransfers] = useState<
     Map<string, FileTransferProgress>
   >(new Map());
@@ -167,10 +201,72 @@ const AppInner: React.FC = () => {
   const metricsLastBytesRef = useRef<{ bytes: number; ts: number } | null>(
     null,
   );
+  const connectedPeerRef = useRef<{ name: string; code: string } | null>(null);
+  const voicemailRecorderRef = useRef<MediaRecorder | null>(null);
+  const voicemailChunksRef = useRef<BlobPart[]>([]);
+  const [voicemailRecording, setVoicemailRecording] = useState(false);
 
   useEffect(() => {
     fileTransfersRef.current = fileTransfers;
   }, [fileTransfers]);
+
+  useEffect(() => {
+    connectedPeerRef.current = connectedPeer;
+  }, [connectedPeer]);
+
+  const getAvatarSrc = useCallback(
+    (avatarId?: string) => {
+      if (!avatarId) return undefined;
+      if (avatarId === "custom") {
+        return customAvatarUrl ?? undefined;
+      }
+      return AVATAR_MAP[avatarId] ?? undefined;
+    },
+    [customAvatarUrl],
+  );
+
+  const getFriendByCode = useCallback(
+    (code?: string | null) => {
+      if (!code) return undefined;
+      return friends.find((f) => f.callingCode === code && f.approved);
+    },
+    [friends],
+  );
+
+  useEffect(() => {
+    const onResize = () => {
+      setIsMobile(window.innerWidth <= MOBILE_BREAKPOINT);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
+  useEffect(() => {
+    const clamped = Math.min(1.2, Math.max(0.9, uiScale));
+    document.documentElement.style.setProperty(
+      "--xdx-ui-scale",
+      clamped.toFixed(2),
+    );
+    window.localStorage.setItem("xdx-ui-scale", String(clamped));
+  }, [uiScale]);
+
+  const handleTitlebarMouseDown = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      if (isMobile || e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      if (
+        target.closest(
+          "button,input,textarea,select,a,[data-no-drag='true']",
+        )
+      ) {
+        return;
+      }
+      getCurrentWindow()
+        .startDragging()
+        .catch(() => {});
+    },
+    [isMobile],
+  );
 
   const refreshDownloads = useCallback(() => {
     bridge.current
@@ -187,6 +283,8 @@ const AppInner: React.FC = () => {
       try {
         const prof = await bridge.current.getProfile();
         setProfile(prof);
+        const customAvatar = await bridge.current.loadCustomAvatar();
+        setCustomAvatarUrl(customAvatar);
 
         const friendsList = await bridge.current.getFriends();
         setFriends(friendsList);
@@ -311,10 +409,27 @@ const AppInner: React.FC = () => {
           break;
         }
         case "hello": {
-          const isFriend = friends.some(
-            (f) => f.callingCode === msg.callingCode && f.approved,
-          );
-          if (isFriend) {
+          const existingFriend = getFriendByCode(msg.callingCode);
+          if (existingFriend) {
+            if (
+              (msg.avatarId && msg.avatarId !== existingFriend.avatarId) ||
+              (msg.publicKey && msg.publicKey !== existingFriend.publicKey)
+            ) {
+              bridge.current
+                .addFriend(
+                  msg.callingCode,
+                  msg.displayName,
+                  msg.avatarId,
+                  msg.publicKey,
+                )
+                .then((friend) =>
+                  setFriends((prev) => [
+                    ...prev.filter((f) => f.callingCode !== friend.callingCode),
+                    friend,
+                  ]),
+                )
+                .catch(() => {});
+            }
             setConnectedPeer({
               name: msg.displayName,
               code: msg.callingCode,
@@ -338,6 +453,8 @@ const AppInner: React.FC = () => {
             setPendingFriendRequest({
               callingCode: msg.callingCode,
               displayName: msg.displayName,
+              avatarId: msg.avatarId,
+              publicKey: msg.publicKey,
             });
           }
           break;
@@ -348,8 +465,28 @@ const AppInner: React.FC = () => {
             code: msg.callingCode,
           });
           bridge.current
-            .addFriend(msg.callingCode, msg.displayName)
-            .then((f) => setFriends((prev) => [...prev.filter((x) => x.callingCode !== f.callingCode), f]))
+            .addFriend(
+              msg.callingCode,
+              msg.displayName,
+              msg.avatarId,
+              msg.publicKey,
+            )
+            .then(async (f) => {
+              setFriends((prev) => [
+                ...prev.filter((x) => x.callingCode !== f.callingCode),
+                f,
+              ]);
+              const prof = profile ?? (await bridge.current.getProfile());
+              bridge.current
+                .sendSignal({
+                  type: "hello",
+                  callingCode: prof.callingCode,
+                  displayName: prof.displayName,
+                  avatarId: prof.avatarId,
+                  publicKey: f.publicKey ?? undefined,
+                })
+                .catch(() => {});
+            })
             .catch(() => {});
           Toast.success({ content: t("friends.approved") });
           setChatOpen(true);
@@ -358,29 +495,56 @@ const AppInner: React.FC = () => {
           setPendingFriendRequest({
             callingCode: msg.callingCode,
             displayName: msg.displayName,
+            avatarId: msg.avatarId,
           });
           break;
         case "file-offer": {
+          const kind = msg.kind ?? "file";
+          const senderCode = msg.fromCode ?? connectedPeerRef.current?.code;
+          if (kind === "voicemail") {
+            const friend = getFriendByCode(senderCode);
+            const keyOk =
+              !!friend?.publicKey &&
+              !!msg.voicemailAuth &&
+              friend.publicKey === msg.voicemailAuth;
+            if (!keyOk) {
+              bridge.current
+                .sendSignal({ type: "file-reject", fileId: msg.fileId })
+                .catch(() => {});
+              Toast.warning({ content: t("voicemail.unauthorized") });
+              break;
+            }
+          }
+
           const transfer: FileTransferProgress = {
             fileId: msg.fileId,
             fileName: msg.fileName,
             byteSize: msg.fileSize,
             totalSize: msg.totalChunks ?? 1,
             received: 0,
+            kind,
             sha256: msg.sha256,
             verified: false,
             direction: "receive",
-            status: "offering",
+            status: kind === "voicemail" ? "transferring" : "offering",
           };
           setFileTransfers((prev) => new Map(prev).set(msg.fileId, transfer));
           const offerMsg: ChatMessage = {
             id: `file-offer-${msg.fileId}`,
             from: "remote",
-            text: `📎 ${msg.fileName} (${formatFileSize(msg.fileSize)})`,
+            text:
+              kind === "voicemail"
+                ? `🎙️ ${msg.fileName} (${formatFileSize(msg.fileSize)})`
+                : `📎 ${msg.fileName} (${formatFileSize(msg.fileSize)})`,
             fileName: msg.fileName,
             timestamp: Date.now(),
           };
           setChatMessages((prev) => [...prev, offerMsg]);
+          if (kind === "voicemail") {
+            bridge.current
+              .sendSignal({ type: "file-accept", fileId: msg.fileId })
+              .catch(() => {});
+          }
           break;
         }
         case "file-accept": {
@@ -453,8 +617,12 @@ const AppInner: React.FC = () => {
                 fullB64,
                 expectedHash,
               );
+              const receivedLabel =
+                transfer.kind === "voicemail"
+                  ? t("voicemail.received")
+                  : t("chat.fileReceived");
               Toast.success({
-                content: `${t("chat.fileReceived")}: ${saved.fileName}`,
+                content: `${receivedLabel}: ${saved.fileName}`,
               });
               setFileTransfers((prev) => {
                 const next = new Map(prev);
@@ -468,6 +636,9 @@ const AppInner: React.FC = () => {
                 return next;
               });
               refreshDownloads();
+              if (transfer.kind === "voicemail") {
+                setSidebarTab("voicemail");
+              }
             };
 
             verifyAndSave().catch((err) => {
@@ -502,9 +673,20 @@ const AppInner: React.FC = () => {
       }
     });
     return unsub;
-  }, [friends, refreshDownloads, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [getFriendByCode, profile, refreshDownloads, t]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cleanupCall = useCallback(() => {
+    const recorder = voicemailRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    voicemailRecorderRef.current = null;
+    voicemailChunksRef.current = [];
+    setVoicemailRecording(false);
     rtcRef.current?.close();
     rtcRef.current = null;
     media.stopCamera();
@@ -516,6 +698,10 @@ const AppInner: React.FC = () => {
 
   const handleProfileChanged = useCallback((p: UserProfile) => {
     setProfile(p);
+    bridge.current
+      .loadCustomAvatar()
+      .then((avatar) => setCustomAvatarUrl(avatar))
+      .catch(() => {});
     window.dispatchEvent(new CustomEvent("xdx-profile-changed"));
   }, []);
 
@@ -628,6 +814,17 @@ const AppInner: React.FC = () => {
   }, []);
 
   const handleEndCall = useCallback(async () => {
+    const recorder = voicemailRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      try {
+        recorder.stop();
+      } catch {
+        /* ignore */
+      }
+    }
+    voicemailRecorderRef.current = null;
+    voicemailChunksRef.current = [];
+    setVoicemailRecording(false);
     try {
       bridge.current.sendSignal({ type: "hangup" }).catch(() => {});
       await bridge.current.endCall();
@@ -642,16 +839,56 @@ const AppInner: React.FC = () => {
     }
   }, [cleanupCall, connectedPeer]);
 
-  const handleRecordVoicemail = useCallback(async () => {
+  const handleRecordVoicemail = useCallback(async (): Promise<boolean> => {
+    const peerCode = connectedPeerRef.current?.code;
+    const friend = getFriendByCode(peerCode);
+    if (!friend?.publicKey) {
+      Toast.warning({ content: t("voicemail.onlyFriends") });
+      return false;
+    }
+
     try {
-      await media.startCamera(true, true);
+      const stream = media.localStream ?? (await media.startCamera(true, true));
+      if (!stream) {
+        Toast.error({ content: t("toast.mediaFailed") });
+        return false;
+      }
+      if (typeof MediaRecorder === "undefined") {
+        Toast.error({ content: t("voicemail.recordUnsupported") });
+        return false;
+      }
+
       const result = await bridge.current.recordVoicemail();
-      if (result.success)
-        Toast.info({ content: t("toast.recordingStarted") });
+      if (!result.success) {
+        Toast.error({ content: t("toast.recordFailed") });
+        return false;
+      }
+
+      const preferredMime = [
+        "video/mp4",
+        "video/webm;codecs=vp8,opus",
+        "video/webm",
+      ].find((m) => MediaRecorder.isTypeSupported(m));
+
+      const recorder = preferredMime
+        ? new MediaRecorder(stream, { mimeType: preferredMime })
+        : new MediaRecorder(stream);
+      voicemailChunksRef.current = [];
+      recorder.ondataavailable = (ev: BlobEvent) => {
+        if (ev.data && ev.data.size > 0) {
+          voicemailChunksRef.current.push(ev.data);
+        }
+      };
+      recorder.start(300);
+      voicemailRecorderRef.current = recorder;
+      setVoicemailRecording(true);
+      Toast.info({ content: t("toast.recordingStarted") });
+      return true;
     } catch (err) {
       Toast.error({ content: `${t("toast.recordFailed")}: ${err}` });
+      return false;
     }
-  }, [media, t]);
+  }, [getFriendByCode, media, t]);
 
   // -- Chat (TCP signaling only) --
   const handleSendText = useCallback(
@@ -756,18 +993,21 @@ const AppInner: React.FC = () => {
         setChatOpen(true);
         setUnreadChat(0);
         const prof = profile ?? (await bridge.current.getProfile());
+        const knownFriend = getFriendByCode(peer.callingCode);
         bridge.current
           .sendSignal({
             type: "hello",
             callingCode: prof.callingCode,
             displayName: prof.displayName,
+            avatarId: knownFriend ? prof.avatarId : undefined,
+            publicKey: knownFriend?.publicKey ?? undefined,
           })
           .catch(() => {});
       } catch (err) {
         Toast.error({ content: `${t("chat.connectFailed")}: ${err}` });
       }
     },
-    [connectedPeer, profile, t],
+    [connectedPeer, getFriendByCode, profile, t],
   );
 
   const handleDisconnectChat = useCallback(() => {
@@ -787,20 +1027,25 @@ const AppInner: React.FC = () => {
     const req = pendingFriendRequest;
     setPendingFriendRequest(null);
     try {
+      const friendKey = req.publicKey ?? generateFriendKey();
+      const prof = profile ?? (await bridge.current.getProfile());
       const friend = await bridge.current.addFriend(
         req.callingCode,
         req.displayName,
+        req.avatarId,
+        friendKey,
       );
       setFriends((prev) => [
         ...prev.filter((f) => f.callingCode !== friend.callingCode),
         friend,
       ]);
-      const prof = profile ?? (await bridge.current.getProfile());
       bridge.current
         .sendSignal({
           type: "friend-accept",
           callingCode: prof.callingCode,
           displayName: prof.displayName,
+          avatarId: prof.avatarId,
+          publicKey: friendKey,
         })
         .catch(() => {});
       setConnectedPeer({ name: req.displayName, code: req.callingCode });
@@ -816,40 +1061,41 @@ const AppInner: React.FC = () => {
     bridge.current.sendSignal({ type: "decline" }).catch(() => {});
   }, []);
 
-  const handleSendFile = useCallback(
-    async (file: File) => {
+  const sendTransfer = useCallback(
+    async (opts: {
+      fileName: string;
+      bytes: Uint8Array;
+      kind?: "file" | "voicemail";
+      voicemailAuth?: string;
+    }): Promise<boolean> => {
+      const kind = opts.kind ?? "file";
       const fileId = `f-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer);
-      const checksum = await sha256Hex(bytes);
-      let b64 = "";
-      const BATCH = 8192;
-      for (let i = 0; i < bytes.length; i += BATCH) {
-        const chunk = bytes.subarray(i, i + BATCH);
-        b64 += String.fromCharCode(...chunk);
-      }
-      b64 = btoa(b64);
+      const checksum = await sha256Hex(opts.bytes);
+      const b64 = bytesToBase64(opts.bytes);
 
       const CHUNK_SIZE = 49152;
       const totalChunks = Math.ceil(b64.length / CHUNK_SIZE);
+      const prof = profile ?? (await bridge.current.getProfile());
 
-      bridge.current
-        .sendSignal({
-          type: "file-offer",
-          fileId,
-          fileName: file.name,
-          fileSize: file.size,
-          totalChunks,
-          sha256: checksum,
-        })
-        .catch(() => {});
+      await bridge.current.sendSignal({
+        type: "file-offer",
+        fileId,
+        fileName: opts.fileName,
+        fileSize: opts.bytes.byteLength,
+        fromCode: prof.callingCode,
+        kind,
+        voicemailAuth: opts.voicemailAuth,
+        totalChunks,
+        sha256: checksum,
+      });
 
       const transfer: FileTransferProgress = {
         fileId,
-        fileName: file.name,
-        byteSize: file.size,
+        fileName: opts.fileName,
+        byteSize: opts.bytes.byteLength,
         totalSize: totalChunks,
         received: 0,
+        kind,
         sha256: checksum,
         verified: false,
         direction: "send",
@@ -860,8 +1106,11 @@ const AppInner: React.FC = () => {
       const sentMsg: ChatMessage = {
         id: `file-send-${fileId}`,
         from: "local",
-        text: `📎 ${file.name} (${formatFileSize(file.size)})`,
-        fileName: file.name,
+        text:
+          kind === "voicemail"
+            ? `🎙️ ${opts.fileName} (${formatFileSize(opts.bytes.byteLength)})`
+            : `📎 ${opts.fileName} (${formatFileSize(opts.bytes.byteLength)})`,
+        fileName: opts.fileName,
         timestamp: Date.now(),
       };
       setChatMessages((prev) => [...prev, sentMsg]);
@@ -888,20 +1137,18 @@ const AppInner: React.FC = () => {
           if (existing) next.set(fileId, { ...existing, status: "rejected" });
           return next;
         });
-        return;
+        return false;
       }
 
       for (let i = 0; i < totalChunks; i++) {
         const data = b64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        await bridge.current
-          .sendSignal({
-            type: "file-chunk",
-            fileId,
-            offset: i,
-            data,
-            total: totalChunks,
-          })
-          .catch(() => {});
+        await bridge.current.sendSignal({
+          type: "file-chunk",
+          fileId,
+          offset: i,
+          data,
+          total: totalChunks,
+        });
         setFileTransfers((prev) => {
           const next = new Map(prev);
           const t = next.get(fileId);
@@ -910,24 +1157,114 @@ const AppInner: React.FC = () => {
         });
       }
 
-      await bridge.current
-        .sendSignal({ type: "file-complete", fileId, sha256: checksum })
-        .catch(() => {});
+      await bridge.current.sendSignal({
+        type: "file-complete",
+        fileId,
+        sha256: checksum,
+      });
       setFileTransfers((prev) => {
         const next = new Map(prev);
         const existing = next.get(fileId);
-        if (existing)
+        if (existing) {
           next.set(fileId, {
             ...existing,
             status: "complete",
             verified: true,
           });
+        }
         return next;
       });
-      Toast.success({ content: `${t("chat.fileSent")}: ${file.name}` });
+      return true;
     },
-    [t],
+    [profile],
   );
+
+  const handleSendFile = useCallback(
+    async (file: File) => {
+      try {
+        const buffer = await file.arrayBuffer();
+        const sent = await sendTransfer({
+          fileName: file.name,
+          bytes: new Uint8Array(buffer),
+          kind: "file",
+        });
+        if (sent) {
+          Toast.success({ content: `${t("chat.fileSent")}: ${file.name}` });
+        }
+      } catch (err) {
+        Toast.error({ content: String(err) });
+      }
+    },
+    [sendTransfer, t],
+  );
+
+  const handleStopVoicemail = useCallback(async () => {
+    const recorder = voicemailRecorderRef.current;
+    if (!recorder) {
+      setVoicemailRecording(false);
+      await handleEndCall();
+      return;
+    }
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      try {
+        recorder.onstop = () => {
+          const parts = voicemailChunksRef.current;
+          resolve(
+            new Blob(parts, {
+              type: recorder.mimeType || "video/webm",
+            }),
+          );
+        };
+        recorder.onerror = () => reject(new Error("Recorder error"));
+        recorder.stop();
+      } catch (err) {
+        reject(err);
+      }
+    }).catch((err) => {
+      Toast.error({ content: `${t("toast.recordFailed")}: ${err}` });
+      return null;
+    });
+
+    voicemailRecorderRef.current = null;
+    setVoicemailRecording(false);
+
+    try {
+      await bridge.current.stopVoicemail();
+    } catch {
+      /* ignore */
+    }
+
+    if (!blob || blob.size === 0) {
+      await handleEndCall();
+      return;
+    }
+
+    const peerCode = connectedPeerRef.current?.code;
+    const friend = getFriendByCode(peerCode);
+    if (!friend?.publicKey) {
+      Toast.warning({ content: t("voicemail.onlyFriends") });
+      await handleEndCall();
+      return;
+    }
+
+    const buffer = await blob.arrayBuffer();
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const ext = blob.type.includes("mp4") ? "mp4" : "webm";
+    const fileName = `voicemail_${peerCode ?? "peer"}_${timestamp}.${ext}`;
+    const sent = await sendTransfer({
+      fileName,
+      bytes: new Uint8Array(buffer),
+      kind: "voicemail",
+      voicemailAuth: friend.publicKey,
+    });
+    if (sent) {
+      Toast.success({ content: t("voicemail.sent") });
+    } else {
+      Toast.warning({ content: t("voicemail.sendFailed") });
+    }
+    await handleEndCall();
+  }, [getFriendByCode, handleEndCall, sendTransfer, t]);
 
   const handleAcceptFile = useCallback(
     (fileId: string) => {
@@ -1078,265 +1415,320 @@ const AppInner: React.FC = () => {
     };
   }, [callState]);
 
-  const filteredPeers = searchQuery
+  const friendCodeSet = new Set(friends.map((f) => f.callingCode));
+
+  const filteredPeers = (searchQuery
     ? peers.filter(
         (p) =>
           p.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
           p.callingCode.includes(searchQuery),
       )
-    : peers;
+    : peers
+  )
+    .slice()
+    .sort((a, b) => {
+      const aFriend = friendCodeSet.has(a.callingCode) ? 0 : 1;
+      const bFriend = friendCodeSet.has(b.callingCode) ? 0 : 1;
+      if (aFriend !== bFriend) return aFriend - bFriend;
+      return a.displayName.localeCompare(b.displayName);
+    });
 
   // -- Render sidebar --
-  const renderSidebar = () => (
-    <div className="xdx-sidebar">
-      {/* Titlebar drag region (macOS overlay) */}
-      <div className="xdx-titlebar" data-tauri-drag-region="">
-        <div className="xdx-titlebar-spacer" />
-        <div className="xdx-titlebar-title" data-tauri-drag-region="">
-          <img src={foxDefault} alt="" className="xdx-titlebar-icon" />
-          <span>{t("app.name")}</span>
-        </div>
-      </div>
+  const renderSidebar = () => {
+    const ownAvatar = getAvatarSrc(profile?.avatarId) ?? foxBandana;
+    const voicemailEntries = downloads.filter((entry) =>
+      entry.fileName.startsWith("voicemail_"),
+    );
+    const sidebarTabs: Array<{
+      key: SidebarTab | "dial";
+      icon: React.ReactNode;
+      label: string;
+    }> = [
+      {
+        key: "peers",
+        icon: <IconUser size="small" />,
+        label: t("sidebar.peers"),
+      },
+      {
+        key: "dial",
+        icon: <IconPhone size="small" />,
+        label: t("sidebar.dial"),
+      },
+      {
+        key: "voicemail",
+        icon: <IconComment size="small" />,
+        label: t("sidebar.voicemail"),
+      },
+      {
+        key: "downloads",
+        icon: <IconDownload size="small" />,
+        label: t("sidebar.downloads"),
+      },
+    ];
 
-      <div className="xdx-sidebar-header">
-        <div className="xdx-app-brand">
-          <div className="xdx-brand-icon">
-            <img src={foxBandana} alt="" className="xdx-brand-img" />
+    return (
+      <div className="xdx-sidebar">
+        <div
+          className="xdx-titlebar"
+          data-tauri-drag-region=""
+          onMouseDown={handleTitlebarMouseDown}
+        >
+          <div className="xdx-titlebar-spacer" data-tauri-drag-region="" />
+          <div className="xdx-titlebar-title" data-tauri-drag-region="">
+            <img
+              src={ownAvatar}
+              alt=""
+              className="xdx-titlebar-icon"
+              data-tauri-drag-region=""
+            />
+            <span data-tauri-drag-region="">{t("app.name")}</span>
           </div>
-          <div className="xdx-brand-text">
-            <Title heading={5} style={{ color: "#fff", margin: 0 }}>
-              {t("app.name")}
-            </Title>
+        </div>
+
+        <div className="xdx-sidebar-header">
+          <div className="xdx-app-brand">
+            <div className="xdx-brand-icon">
+              <img src={ownAvatar} alt="" className="xdx-brand-img" />
+            </div>
+            <div className="xdx-brand-text">
+              <Title heading={5} style={{ color: "#fff", margin: 0 }}>
+                {t("app.name")}
+              </Title>
+              <Text
+                size="small"
+                style={{
+                  color: "rgba(255,255,255,0.52)",
+                  fontSize: 11,
+                }}
+              >
+                {t("app.nameCn")} · {t("app.subtitle")}
+              </Text>
+            </div>
+          </div>
+          <div className="xdx-sidebar-search">
+            <IconSearch style={{ color: "rgba(255,255,255,0.32)" }} size="small" />
+            <input
+              className="xdx-search-input"
+              placeholder={t("sidebar.search")}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="xdx-contact-list">
+          {sidebarTab === "peers" && (
+            <>
+              {!coreReady ? (
+                <div className="xdx-loading">
+                  <Spin size="large" />
+                  <Text
+                    style={{
+                      color: "rgba(255,255,255,0.52)",
+                      marginTop: 12,
+                      display: "block",
+                    }}
+                  >
+                    {t("sidebar.connecting")}
+                  </Text>
+                </div>
+              ) : filteredPeers.length === 0 && searchQuery ? (
+                <div className="xdx-no-peers">
+                  <Text
+                    style={{
+                      color: "rgba(255,255,255,0.45)",
+                      textAlign: "center",
+                      padding: "20px 12px",
+                      display: "block",
+                    }}
+                  >
+                    No matches for "{searchQuery}"
+                  </Text>
+                </div>
+              ) : filteredPeers.length === 0 ? (
+                <div className="xdx-no-peers">
+                  <EventCard
+                    image={foxSleeping}
+                    title={t("sidebar.noPeers")}
+                    description={t("sidebar.noPeersHint")}
+                  />
+                </div>
+              ) : (
+                filteredPeers.map((peer) => (
+                  <div key={peer.callingCode} className="xdx-contact-item">
+                    <div className="xdx-contact-avatar">
+                      <Avatar
+                        src={getAvatarSrc(getFriendByCode(peer.callingCode)?.avatarId)}
+                        size="small"
+                        style={{
+                          background:
+                            "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                        }}
+                      >
+                        {peer.displayName.charAt(0)}
+                      </Avatar>
+                      <span className="xdx-status-dot online" />
+                    </div>
+                    <div className="xdx-contact-main">
+                      <div className="xdx-contact-info">
+                        <Text className="xdx-contact-name">{peer.displayName}</Text>
+                        <Text size="small" className="xdx-contact-status">
+                          {peer.callingCode} · {t("sidebar.online")}
+                        </Text>
+                      </div>
+                      {callState === CallState.Idle && (
+                        <div className="xdx-contact-actions">
+                          <Tooltip content={t("chat.title")} position="top">
+                            <button
+                              className="xdx-action-btn"
+                              onClick={() => handleOpenChat(peer)}
+                            >
+                              <IconComment size="small" />
+                            </button>
+                          </Tooltip>
+                          <Tooltip content={t("dialpad.callVideo")} position="top">
+                            <button
+                              className="xdx-action-btn"
+                              onClick={() => handleStartCallFromPeer(peer, false)}
+                            >
+                              <IconCamera size="small" />
+                            </button>
+                          </Tooltip>
+                          <Tooltip content={t("dialpad.callAudio")} position="top">
+                            <button
+                              className="xdx-action-btn"
+                              onClick={() => handleStartCallFromPeer(peer, true)}
+                            >
+                              <IconMicrophone size="small" />
+                            </button>
+                          </Tooltip>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))
+              )}
+            </>
+          )}
+
+          {sidebarTab === "voicemail" && (
+            <div className="xdx-downloads">
+              {voicemailEntries.length === 0 ? (
+                <div className="xdx-no-peers" style={{ padding: "24px 12px" }}>
+                  <EventCard
+                    image={foxSleeping}
+                    title={t("sidebar.voicemail")}
+                    description={t("voicemail.empty")}
+                  />
+                </div>
+              ) : (
+                voicemailEntries.map((entry) => (
+                  <div key={entry.path} className="xdx-download-item voicemail">
+                    <div className="xdx-download-main">
+                      <div className="xdx-download-name" title={entry.fileName}>
+                        {entry.fileName}
+                      </div>
+                      <div className="xdx-download-meta">
+                        {formatFileSize(entry.sizeBytes)} ·{" "}
+                        {formatShortTime(entry.modifiedAt)}
+                      </div>
+                      <div className="xdx-download-hash">
+                        SHA-256: {entry.sha256.slice(0, 16)}...
+                      </div>
+                    </div>
+                    <button
+                      className="xdx-download-open"
+                      onClick={() => handleOpenDownloadedFile(entry.path)}
+                    >
+                      {t("voicemail.play")}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          {sidebarTab === "downloads" && (
+            <div className="xdx-downloads">
+              {downloads.length === 0 ? (
+                <div className="xdx-no-peers" style={{ padding: "24px 12px" }}>
+                  <EventCard
+                    image={foxSleeping}
+                    title={t("downloads.title")}
+                    description={t("downloads.empty")}
+                  />
+                </div>
+              ) : (
+                downloads.map((entry) => (
+                  <div key={entry.path} className="xdx-download-item">
+                    <div className="xdx-download-main">
+                      <div className="xdx-download-name" title={entry.fileName}>
+                        {entry.fileName}
+                      </div>
+                      <div className="xdx-download-meta">
+                        {formatFileSize(entry.sizeBytes)} ·{" "}
+                        {formatShortTime(entry.modifiedAt)}
+                      </div>
+                      <div className="xdx-download-hash">
+                        SHA-256: {entry.sha256.slice(0, 16)}...
+                      </div>
+                    </div>
+                    <button
+                      className="xdx-download-open"
+                      onClick={() => handleOpenDownloadedFile(entry.path)}
+                    >
+                      {t("downloads.open")}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="xdx-sidebar-footer">
+          <Tooltip content={t("sidebar.settings")} position="top">
+            <button
+              className="xdx-footer-btn"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <IconSetting size="small" />
+            </button>
+          </Tooltip>
+          <div className="xdx-core-status">
+            <span className={`xdx-engine-dot ${coreReady ? "ready" : ""}`} />
             <Text
               size="small"
-              style={{
-                color: "rgba(255,255,255,0.42)",
-                fontSize: 11,
-              }}
+              style={{ color: "rgba(255,255,255,0.45)", fontSize: 11 }}
             >
-              {t("app.nameCn")} · {t("app.subtitle")}
+              {coreReady ? t("sidebar.engineReady") : t("sidebar.engineOffline")}
             </Text>
           </div>
         </div>
-        <div className="xdx-sidebar-search">
-          <IconSearch
-            style={{ color: "rgba(255,255,255,0.22)" }}
-            size="small"
-          />
-          <input
-            className="xdx-search-input"
-            placeholder={t("sidebar.search")}
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-          />
+
+        <div className="xdx-sidebar-tabs">
+          {sidebarTabs.map((tab) => (
+            <button
+              key={tab.key}
+              className={`xdx-tab ${
+                tab.key !== "dial" && sidebarTab === tab.key ? "active" : ""
+              }`}
+              onClick={() => {
+                if (tab.key === "dial") {
+                  setDialPadOpen(true);
+                  return;
+                }
+                setSidebarTab(tab.key);
+              }}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+            </button>
+          ))}
         </div>
       </div>
-
-      <div className="xdx-sidebar-tabs">
-        {(
-          [
-            {
-              key: "peers" as SidebarTab,
-              icon: <IconUser size="small" />,
-              label: t("sidebar.peers"),
-            },
-            {
-              key: "dial" as SidebarTab,
-              icon: <IconPhone size="small" />,
-              label: t("sidebar.dial"),
-            },
-            {
-              key: "voicemail" as SidebarTab,
-              icon: <IconComment size="small" />,
-              label: t("sidebar.voicemail"),
-            },
-            {
-              key: "downloads" as SidebarTab,
-              icon: <IconDownload size="small" />,
-              label: t("sidebar.downloads"),
-            },
-          ] as const
-        ).map((tab) => (
-          <button
-            key={tab.key}
-            className={`xdx-tab ${sidebarTab === tab.key ? "active" : ""}`}
-            onClick={() => setSidebarTab(tab.key)}
-          >
-            {tab.icon}
-            <span>{tab.label}</span>
-          </button>
-        ))}
-      </div>
-
-      <div className="xdx-contact-list">
-        {sidebarTab === "peers" && (
-          <>
-            {!coreReady ? (
-              <div className="xdx-loading">
-                <Spin size="large" />
-                <Text
-                  style={{
-                    color: "rgba(255,255,255,0.42)",
-                    marginTop: 12,
-                    display: "block",
-                  }}
-                >
-                  {t("sidebar.connecting")}
-                </Text>
-              </div>
-            ) : filteredPeers.length === 0 && searchQuery ? (
-              <div className="xdx-no-peers">
-                <Text style={{ color: "rgba(255,255,255,0.4)", textAlign: "center", padding: "20px 12px", display: "block" }}>
-                  No matches for "{searchQuery}"
-                </Text>
-              </div>
-            ) : filteredPeers.length === 0 ? (
-              <div className="xdx-no-peers">
-                <EventCard
-                  image={foxSleeping}
-                  title={t("sidebar.noPeers")}
-                  description={t("sidebar.noPeersHint")}
-                />
-              </div>
-            ) : (
-              filteredPeers.map((peer) => (
-                <div key={peer.callingCode} className="xdx-contact-item">
-                  <div className="xdx-contact-avatar">
-                    <Avatar
-                      size="small"
-                      style={{
-                        background:
-                          "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-                      }}
-                    >
-                      {peer.displayName.charAt(0)}
-                    </Avatar>
-                    <span className="xdx-status-dot online" />
-                  </div>
-                  <div className="xdx-contact-info">
-                    <Text className="xdx-contact-name">
-                      {peer.displayName}
-                    </Text>
-                    <Text size="small" className="xdx-contact-status">
-                      {peer.callingCode} · {t("sidebar.online")}
-                    </Text>
-                  </div>
-                  {callState === CallState.Idle && (
-                    <div className="xdx-contact-actions">
-                      <Tooltip content={t("chat.title")} position="top">
-                        <button
-                          className="xdx-action-btn"
-                          onClick={() => handleOpenChat(peer)}
-                        >
-                          <IconComment size="small" />
-                        </button>
-                      </Tooltip>
-                      <Tooltip content={t("dialpad.callVideo")} position="top">
-                        <button
-                          className="xdx-action-btn"
-                          onClick={() =>
-                            handleStartCallFromPeer(peer, false)
-                          }
-                        >
-                          <IconCamera size="small" />
-                        </button>
-                      </Tooltip>
-                      <Tooltip content={t("dialpad.callAudio")} position="top">
-                        <button
-                          className="xdx-action-btn"
-                          onClick={() =>
-                            handleStartCallFromPeer(peer, true)
-                          }
-                        >
-                          <IconMicrophone size="small" />
-                        </button>
-                      </Tooltip>
-                    </div>
-                  )}
-                </div>
-              ))
-            )}
-          </>
-        )}
-
-        {sidebarTab === "dial" && profile && (
-          <DialPad
-            callingCode={profile.callingCode}
-            onCallStarted={handleDialCallStarted}
-          />
-        )}
-
-        {sidebarTab === "voicemail" && (
-          <div className="xdx-no-peers" style={{ padding: "24px 12px" }}>
-            <EventCard
-              image={foxSleeping}
-              title={t("sidebar.voicemail")}
-              description="No messages yet."
-            />
-          </div>
-        )}
-
-        {sidebarTab === "downloads" && (
-          <div className="xdx-downloads">
-            {downloads.length === 0 ? (
-              <div className="xdx-no-peers" style={{ padding: "24px 12px" }}>
-                <EventCard
-                  image={foxSleeping}
-                  title={t("downloads.title")}
-                  description={t("downloads.empty")}
-                />
-              </div>
-            ) : (
-              downloads.map((entry) => (
-                <div key={entry.path} className="xdx-download-item">
-                  <div className="xdx-download-main">
-                    <div className="xdx-download-name" title={entry.fileName}>
-                      {entry.fileName}
-                    </div>
-                    <div className="xdx-download-meta">
-                      {formatFileSize(entry.sizeBytes)} ·{" "}
-                      {formatShortTime(entry.modifiedAt)}
-                    </div>
-                    <div className="xdx-download-hash">
-                      SHA-256: {entry.sha256.slice(0, 16)}...
-                    </div>
-                  </div>
-                  <button
-                    className="xdx-download-open"
-                    onClick={() => handleOpenDownloadedFile(entry.path)}
-                  >
-                    {t("downloads.open")}
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="xdx-sidebar-footer">
-        <Tooltip content={t("sidebar.settings")} position="top">
-          <button
-            className="xdx-footer-btn"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <IconSetting size="small" />
-          </button>
-        </Tooltip>
-        <div className="xdx-core-status">
-          <span className={`xdx-engine-dot ${coreReady ? "ready" : ""}`} />
-          <Text
-            size="small"
-            style={{ color: "rgba(255,255,255,0.32)", fontSize: 11 }}
-          >
-            {coreReady
-              ? t("sidebar.engineReady")
-              : t("sidebar.engineOffline")}
-          </Text>
-        </div>
-      </div>
-    </div>
-  );
+    );
+  };
 
   // -- Idle content with mascot gallery --
   const renderIdleContent = () => (
@@ -1425,13 +1817,22 @@ const AppInner: React.FC = () => {
     callState === CallState.InCallVideo ||
     callState === CallState.InCallAudio ||
     callState === CallState.Voicemail;
+  const mobileEngaged = isMobile && (chatOpen || callState !== CallState.Idle);
 
   return (
     <>
-      <Layout className="xdx-layout">
-        {/* Content-area titlebar drag region */}
-        <div className="xdx-titlebar-content" data-tauri-drag-region="" />
-
+      {!isMobile && (
+        <div
+          className="xdx-window-drag-strip"
+          data-tauri-drag-region=""
+          onMouseDown={handleTitlebarMouseDown}
+        />
+      )}
+      <Layout
+        className={`xdx-layout ${isMobile ? "xdx-mobile" : ""} ${
+          mobileEngaged ? "mobile-engaged" : "mobile-sidebar"
+        }`}
+      >
         <Sider className="xdx-sider">{renderSidebar()}</Sider>
         <Content className="xdx-content">
           <div className={`xdx-content-main ${chatOpen && (connectedPeer || inCall) ? "with-chat" : ""}`}>
@@ -1448,10 +1849,12 @@ const AppInner: React.FC = () => {
                 metrics={callMetrics}
                 chatOpen={chatOpen}
                 unreadChat={unreadChat}
+                voicemailRecording={voicemailRecording}
                 onToggleCamera={media.toggleCamera}
                 onToggleMic={media.toggleMic}
                 onEndCall={handleEndCall}
                 onRecordVoicemail={handleRecordVoicemail}
+                onStopVoicemail={handleStopVoicemail}
                 onToggleChat={handleToggleChat}
               />
             )}
@@ -1643,11 +2046,37 @@ const AppInner: React.FC = () => {
         )}
       </Modal>
 
+      <Modal
+        visible={dialPadOpen}
+        title={t("dialpad.title")}
+        footer={null}
+        centered
+        onCancel={() => setDialPadOpen(false)}
+        className="xdx-incoming-modal xdx-dial-modal"
+        width={420}
+        maskStyle={{
+          backdropFilter: "blur(14px)",
+          background: "rgba(0,0,0,0.52)",
+        }}
+      >
+        {profile && (
+          <DialPad
+            callingCode={profile.callingCode}
+            onCallStarted={(result, audioOnly) => {
+              setDialPadOpen(false);
+              void handleDialCallStarted(result, audioOnly);
+            }}
+          />
+        )}
+      </Modal>
+
       <SettingsPanel
         open={settingsOpen}
         profile={profile}
         onClose={() => setSettingsOpen(false)}
         onProfileChanged={handleProfileChanged}
+        uiScale={uiScale}
+        onUiScaleChange={setUiScale}
       />
     </>
   );

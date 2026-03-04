@@ -1,5 +1,12 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
-import { Typography, Tag, Tooltip, Avatar, Space } from "@douyinfe/semi-ui";
+import {
+  Typography,
+  Tag,
+  Tooltip,
+  Avatar,
+  Space,
+  Button,
+} from "@douyinfe/semi-ui";
 import {
   IconCamera,
   IconDesktop,
@@ -7,6 +14,7 @@ import {
   IconMicrophone,
   IconStop,
   IconComment,
+  IconSetting,
 } from "@douyinfe/semi-icons";
 import { useI18n } from "../i18n/index";
 import {
@@ -27,10 +35,12 @@ interface Props {
   metrics: CallNetworkMetrics | null;
   chatOpen: boolean;
   unreadChat: number;
+  voicemailRecording: boolean;
   onToggleCamera: () => void;
   onToggleMic: () => void;
   onEndCall: () => void;
-  onRecordVoicemail: () => void;
+  onRecordVoicemail: () => Promise<boolean>;
+  onStopVoicemail: () => Promise<void>;
   onToggleChat: () => void;
 }
 
@@ -68,10 +78,12 @@ const CallView: React.FC<Props> = ({
   metrics,
   chatOpen,
   unreadChat,
+  voicemailRecording,
   onToggleCamera,
   onToggleMic,
   onEndCall,
   onRecordVoicemail,
+  onStopVoicemail,
   onToggleChat,
 }) => {
   const { t } = useI18n();
@@ -79,8 +91,8 @@ const CallView: React.FC<Props> = ({
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const [callDuration, setCallDuration] = useState("00:00");
-  const [isRecording, setIsRecording] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [showMetrics, setShowMetrics] = useState(false);
 
   useEffect(() => {
     if (localVideoRef.current && localStream) {
@@ -117,21 +129,24 @@ const CallView: React.FC<Props> = ({
   }, [callState, activeCall.startTime]);
 
   useEffect(() => {
-    if (!isRecording) return;
+    if (!voicemailRecording) return;
     const tick = setInterval(() => setRecordingDuration((d) => d + 1), 1000);
     return () => clearInterval(tick);
-  }, [isRecording]);
+  }, [voicemailRecording]);
 
   const handleStartRecording = useCallback(() => {
-    setIsRecording(true);
-    setRecordingDuration(0);
-    onRecordVoicemail();
+    onRecordVoicemail()
+      .then((started) => {
+        if (started) {
+          setRecordingDuration(0);
+        }
+      })
+      .catch(() => {});
   }, [onRecordVoicemail]);
 
   const handleStopRecording = useCallback(() => {
-    setIsRecording(false);
-    onEndCall();
-  }, [onEndCall]);
+    onStopVoicemail().catch(() => {});
+  }, [onStopVoicemail]);
 
   // ===== Voicemail UI =====
   if (callState === CallState.Voicemail) {
@@ -154,7 +169,7 @@ const CallView: React.FC<Props> = ({
           <Text style={{ color: "rgba(255,255,255,0.45)", marginTop: 4 }}>
             {t("voicemail.leaveMessage")}
           </Text>
-          {isRecording ? (
+          {voicemailRecording ? (
             <div className="xdx-recording-active">
               <div className="xdx-recording-indicator">
                 <span className="xdx-rec-dot" />
@@ -277,6 +292,20 @@ const CallView: React.FC<Props> = ({
           <Text size="small" style={{ color: "rgba(255,255,255,0.3)" }}>
             {activeCall.peerName}
           </Text>
+          <Tooltip
+            content={showMetrics ? "Hide metrics" : "Show metrics"}
+            position="top"
+          >
+            <Button
+              aria-label={showMetrics ? "Hide metrics" : "Show metrics"}
+              theme="borderless"
+              type="tertiary"
+              icon={<IconSetting size="small" />}
+              size="small"
+              className={`xdx-metrics-toggle ${showMetrics ? "active" : ""}`}
+              onClick={() => setShowMetrics((prev) => !prev)}
+            />
+          </Tooltip>
         </div>
         <TallyLight
           label={micOn ? t("call.micLive") : t("call.micOff")}
@@ -290,14 +319,6 @@ const CallView: React.FC<Props> = ({
         <div className="xdx-remote-video">
           {callState === CallState.InCallAudio ? (
             <div className="xdx-audio-only-display">
-              {/* Liquid Glass blobs */}
-              <div className="xdx-liquid-glass-container">
-                <div className="xdx-liquid-blob xdx-blob-1" />
-                <div className="xdx-liquid-blob xdx-blob-2" />
-                <div className="xdx-liquid-blob xdx-blob-3" />
-                <div className="xdx-liquid-blob xdx-blob-4" />
-                <div className="xdx-liquid-blob xdx-blob-5" />
-              </div>
               <div className="xdx-audio-center">
                 <Avatar
                   size="extra-large"
@@ -307,28 +328,18 @@ const CallView: React.FC<Props> = ({
                     width: 96,
                     height: 96,
                     fontSize: 36,
-                    zIndex: 2,
-                    position: "relative",
-                    boxShadow: "0 0 40px rgba(102,126,234,0.3)",
+                    boxShadow: "0 14px 34px rgba(0, 0, 0, 0.42)",
                   }}
                 >
                   {activeCall.peerName.charAt(0)}
                 </Avatar>
-                <Title heading={3} style={{ color: "#fff", marginTop: 20, zIndex: 2, position: "relative" }}>
+                <Title heading={3} style={{ color: "#fff", marginTop: 18 }}>
                   {activeCall.peerName}
                 </Title>
-                <Text style={{ color: "rgba(255,255,255,0.55)", zIndex: 2, position: "relative" }}>
+                <Text className="xdx-audio-call-duration">{callDuration}</Text>
+                <Text style={{ color: "rgba(255,255,255,0.55)" }}>
                   {t("call.audioInProgress")}
                 </Text>
-                <div className="xdx-audio-wave" style={{ zIndex: 2, position: "relative" }}>
-                  {Array.from({ length: 5 }).map((_, i) => (
-                    <span
-                      key={i}
-                      className="xdx-audio-wave-dot"
-                      style={{ animationDelay: `${i * 0.15}s` }}
-                    />
-                  ))}
-                </div>
               </div>
             </div>
           ) : (
@@ -366,7 +377,7 @@ const CallView: React.FC<Props> = ({
               )}
             </>
           )}
-          {metrics && (
+          {metrics && showMetrics && (
             <div className="xdx-metrics-overlay">
               <div className="xdx-metrics-title">Sankaku/RT Telemetry</div>
               <div className="xdx-metrics-row">

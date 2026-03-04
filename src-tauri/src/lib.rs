@@ -130,6 +130,7 @@ struct AppState {
     signaling_port: u16,
     discovered_peers: HashMap<String, DiscoveredPeer>,
     peer_instances: HashMap<String, String>,
+    peer_services: HashMap<String, String>,
     active_peer: Option<String>,
     active_connection: Option<Arc<Mutex<TcpStream>>>,
     session_id: Option<String>,
@@ -334,6 +335,7 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
         let s = state.lock().unwrap();
         (s.profile.clone(), s.instance_id.clone())
     };
+    let local_calling_code = profile.calling_code.clone();
 
     thread::spawn(move || {
         let daemon = match ServiceDaemon::new() {
@@ -382,13 +384,14 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
         loop {
             match receiver.recv() {
                 Ok(ServiceEvent::ServiceResolved(info)) => {
+                    let service_fullname = info.get_fullname().to_string();
                     let remote_inst = info
                         .get_properties()
                         .get("inst")
                         .map(|v| v.val_str().to_string())
                         .unwrap_or_default();
 
-                    if remote_inst == instance_id || remote_inst.is_empty() {
+                    if !remote_inst.is_empty() && remote_inst == instance_id {
                         continue;
                     }
 
@@ -399,6 +402,9 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
                         .unwrap_or_default();
 
                     if code.is_empty() {
+                        continue;
+                    }
+                    if code == local_calling_code {
                         continue;
                     }
 
@@ -420,18 +426,27 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
 
                     if let Ok(mut s) = state.lock() {
                         s.discovered_peers.insert(code.clone(), peer.clone());
-                        s.peer_instances
-                            .insert(remote_inst.clone(), code.clone());
+                        if !remote_inst.is_empty() {
+                            s.peer_instances
+                                .insert(remote_inst.clone(), code.clone());
+                        }
+                        s.peer_services
+                            .insert(service_fullname.clone(), code.clone());
                     }
                     let _ = handle.emit("peer-discovered", &peer);
                 }
                 Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                     let removed_code: Option<String> = {
                         if let Ok(s) = state.lock() {
-                            s.peer_instances
+                            s.peer_services
+                                .get(&fullname)
+                                .cloned()
+                                .or_else(|| {
+                                    s.peer_instances
                                 .iter()
                                 .find(|(inst, _)| fullname.contains(inst.as_str()))
                                 .map(|(_, code)| code.clone())
+                                })
                         } else {
                             None
                         }
@@ -440,6 +455,7 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
                         if let Ok(mut s) = state.lock() {
                             s.discovered_peers.remove(&code);
                             s.peer_instances.retain(|_, v| v != &code);
+                            s.peer_services.retain(|_, v| v != &code);
                         }
                         let _ = handle.emit("peer-lost", &code);
                     }
@@ -709,13 +725,23 @@ fn get_friends(
 fn add_friend(
     calling_code: String,
     display_name: String,
+    avatar_id: Option<String>,
+    public_key: Option<String>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Friend, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     let mut friends = load_friends(&s.friends_path);
     if let Some(existing) = friends.iter_mut().find(|f| f.calling_code == calling_code) {
         existing.approved = true;
-        existing.display_name = display_name.clone();
+        if !display_name.is_empty() {
+            existing.display_name = display_name.clone();
+        }
+        if let Some(avatar) = avatar_id {
+            existing.avatar_id = avatar;
+        }
+        if let Some(key) = public_key {
+            existing.public_key = Some(key);
+        }
         let friend = existing.clone();
         save_friends_to_disk(&s.friends_path, &friends)?;
         return Ok(friend);
@@ -723,8 +749,8 @@ fn add_friend(
     let friend = Friend {
         calling_code: calling_code.clone(),
         display_name,
-        avatar_id: "default".into(),
-        public_key: None,
+        avatar_id: avatar_id.unwrap_or_else(|| "default".into()),
+        public_key,
         approved: true,
         added_at: epoch_secs(),
     };
@@ -998,6 +1024,7 @@ pub fn run() {
                 signaling_port,
                 discovered_peers: HashMap::new(),
                 peer_instances: HashMap::new(),
+                peer_services: HashMap::new(),
                 active_peer: None,
                 active_connection: None,
                 session_id: None,
