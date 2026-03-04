@@ -1,0 +1,29 @@
+[package]
+name = "xiadianxin"
+version = "0.1.0"
+description = "下点心 (XiaDianxin) — P2P video calling super-app powered by Sankaku/RT"
+authors = ["Saffron"]
+edition = "2021"
+
+[lib]
+name = "xiadianxin_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+mdns-sd = "0.11"
+rand = "0.8"
+base64 = "0.22"
+sha2 = "0.10"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

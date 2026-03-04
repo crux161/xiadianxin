@@ -1,0 +1,37 @@
+# =========================
+# 1. Frontend (Node / Vite)
+# =========================
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# =========================
+# 2. Backend (Rust / Tauri)
+# =========================
+src-tauri/target/
+# We strictly ignore the generated mobile projects. Tauri will rebuild these!
+src-tauri/gen/
+
+# =========================
+# 3. OS & Editor Caches
+# =========================
+.DS_Store
+.vscode/
+*.swp
+*.log
+
+# =========================
+# 4. Environment Variables
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# 5. Reference Assett
+# =========================
+reference/Nomikai/
+reference/sankaku/
+reference/kyu2/
+out/
