@@ -107,6 +107,7 @@ pub struct ReceivedFileEntry {
     pub size_bytes: u64,
     pub modified_at: u64,
     pub sha256: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,16 +301,6 @@ fn guess_mime_from_path(path: &Path) -> &'static str {
     }
 }
 
-fn parse_signal_message_type(message: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(message)
-        .ok()
-        .and_then(|v| {
-            v.get("type")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-}
-
 fn is_voicemail_offer(message: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(message) else {
         return false;
@@ -325,16 +316,6 @@ fn is_voicemail_offer(message: &str) -> bool {
         .and_then(|v| v.as_str())
         .map(|kind| kind == "voicemail")
         .unwrap_or(false)
-}
-
-fn voicemail_offer_file_id(message: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(message)
-        .ok()
-        .and_then(|v| {
-            v.get("fileId")
-                .and_then(|file_id| file_id.as_str())
-                .map(|s| s.to_string())
-        })
 }
 
 fn signal_peer_code_from_message(message: &str) -> Option<String> {
@@ -404,6 +385,74 @@ fn format_socket_addr(ip: &str, port: u16) -> String {
     } else {
         format!("{}:{}", ip, port)
     }
+}
+
+fn push_candidate_addr(candidates: &mut Vec<(String, u16)>, ip: String, port: u16) {
+    if ip.trim().is_empty() || port == 0 {
+        return;
+    }
+    if candidates
+        .iter()
+        .any(|(candidate_ip, candidate_port)| candidate_ip == &ip && *candidate_port == port)
+    {
+        return;
+    }
+    candidates.push((ip, port));
+}
+
+fn connect_candidates(
+    code: &str,
+    display_name: &str,
+    mut candidates: Vec<(String, u16)>,
+    handle: AppHandle,
+    state: Arc<Mutex<AppState>>,
+) -> Result<CallResult, String> {
+    candidates.retain(|(addr, _)| {
+        if let Ok(ip) = addr.parse::<IpAddr>() {
+            if let IpAddr::V6(v6) = ip {
+                return !v6.is_unicast_link_local();
+            }
+        }
+        true
+    });
+    candidates.sort_by_key(|(addr, _)| if addr.contains(':') { 1u8 } else { 0u8 });
+
+    if candidates.is_empty() {
+        return Err("No routable addresses".into());
+    }
+
+    let mut last_err = String::from("No routable addresses");
+    for (addr, port) in candidates {
+        let connect_addr = format_socket_addr(&addr, port);
+        let sock_addr = match connect_addr.parse::<std::net::SocketAddr>() {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(4)) {
+            Ok(stream) => {
+                let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
+                let sid = stub_session_id();
+                {
+                    let mut s = state.lock().map_err(|e| e.to_string())?;
+                    s.active_connection = Some(Arc::clone(&writer));
+                    s.active_peer = Some(code.to_string());
+                    s.session_id = Some(sid.clone());
+                }
+                spawn_reader_thread(stream, handle, Arc::clone(&state));
+                return Ok(CallResult {
+                    success: true,
+                    message: format!("{} ({})", display_name, code),
+                    session_id: Some(sid),
+                });
+            }
+            Err(e) => {
+                last_err = format!("{} -> {}", connect_addr, e);
+                eprintln!("[XDX] connect attempt failed: {}", last_err);
+            }
+        }
+    }
+
+    Err(format!("All connection attempts failed: {}", last_err))
 }
 
 // ---------------------------------------------------------------------------
@@ -494,30 +543,7 @@ fn spawn_reader_thread(stream: TcpStream, handle: AppHandle, state: Arc<Mutex<Ap
                         validate_voicemail_signal_for_peer(&msg, peer_code, &friends).err()
                     };
 
-                    if let Some(err) = validation_error {
-                        let message_type =
-                            parse_signal_message_type(&msg).unwrap_or_else(|| "unknown".into());
-                        eprintln!(
-                            "[XDX] dropped unauthorized {} signal: {}",
-                            message_type, err
-                        );
-                        if let Some(file_id) = voicemail_offer_file_id(&msg) {
-                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
-                                "type": "file-reject",
-                                "fileId": file_id
-                            })) {
-                                let conn = {
-                                    let s = state.lock().ok();
-                                    s.and_then(|s| s.active_connection.clone())
-                                };
-                                if let Some(conn) = conn {
-                                    if let Ok(mut stream) = conn.lock() {
-                                        let _ = writeln!(stream, "{}", payload);
-                                        let _ = stream.flush();
-                                    }
-                                }
-                            }
-                        }
+                    if validation_error.is_some() {
                         continue;
                     }
 
@@ -760,54 +786,19 @@ fn connect_to_peer(
         return Err("No addresses available for peer".into());
     }
 
-    // Sort addresses: prefer IPv4 over IPv6, skip link-local IPv6
-    let mut candidates: Vec<String> = peer
+    let candidates: Vec<(String, u16)> = peer
         .addresses
         .iter()
-        .filter(|a| {
-            if let Ok(ip) = a.parse::<IpAddr>() {
-                if let IpAddr::V6(v6) = ip {
-                    return !v6.to_string().starts_with("fe80");
-                }
-            }
-            true
-        })
-        .cloned()
+        .map(|addr| (addr.clone(), peer.port))
         .collect();
-    candidates.sort_by_key(|a| if a.contains(':') { 1u8 } else { 0u8 });
 
-    let mut last_err = String::from("No routable addresses");
-    for addr in &candidates {
-        let connect_addr = format_socket_addr(addr, peer.port);
-        let sock_addr = match connect_addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(_) => continue,
-        };
-        match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(4)) {
-            Ok(stream) => {
-                let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
-                let sid = stub_session_id();
-                {
-                    let mut s = state.lock().map_err(|e| e.to_string())?;
-                    s.active_connection = Some(Arc::clone(&writer));
-                    s.active_peer = Some(code.clone());
-                    s.session_id = Some(sid.clone());
-                }
-                spawn_reader_thread(stream, handle, Arc::clone(state.inner()));
-                return Ok(CallResult {
-                    success: true,
-                    message: format!("{} ({})", peer.display_name, code),
-                    session_id: Some(sid),
-                });
-            }
-            Err(e) => {
-                last_err = format!("{} -> {}", connect_addr, e);
-                eprintln!("[XDX] connect attempt failed: {}", last_err);
-            }
-        }
-    }
-
-    Err(format!("All connection attempts failed: {}", last_err))
+    connect_candidates(
+        &code,
+        &peer.display_name,
+        candidates,
+        handle,
+        Arc::clone(state.inner()),
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -864,6 +855,49 @@ fn dial_code(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<CallResult, String> {
     connect_to_peer(code, handle, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn dial_quicdial(
+    code: String,
+    ip: String,
+    _audio_only: bool,
+    handle: AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<CallResult, String> {
+    let normalized_ip = ip.trim().to_string();
+    if normalized_ip.is_empty() {
+        return Err("Resolved IP is empty".into());
+    }
+
+    let (discovered_peer, fallback_port) = {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        (s.discovered_peers.get(&code).cloned(), s.signaling_port)
+    };
+
+    let display_name = discovered_peer
+        .as_ref()
+        .map(|peer| peer.display_name.clone())
+        .unwrap_or_else(|| "Quicdial Peer".into());
+
+    let mut candidates: Vec<(String, u16)> = Vec::new();
+
+    if let Some(peer) = discovered_peer.as_ref() {
+        push_candidate_addr(&mut candidates, normalized_ip.clone(), peer.port);
+        for addr in &peer.addresses {
+            push_candidate_addr(&mut candidates, addr.clone(), peer.port);
+        }
+    }
+
+    push_candidate_addr(&mut candidates, normalized_ip.clone(), fallback_port);
+
+    connect_candidates(
+        &code,
+        &display_name,
+        candidates,
+        handle,
+        Arc::clone(state.inner()),
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1076,10 +1110,21 @@ fn save_received_file(
     filename: String,
     data_b64: String,
     expected_sha256: Option<String>,
+    kind: Option<String>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<ReceivedFileEntry, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     fs::create_dir_all(&s.received_files_dir).map_err(|e| e.to_string())?;
+    let normalized_kind = kind
+        .unwrap_or_else(|| "file".into())
+        .to_ascii_lowercase();
+    let is_voicemail = normalized_kind == "voicemail";
+    let target_dir = if is_voicemail {
+        s.received_files_dir.join("voicemails")
+    } else {
+        s.received_files_dir.clone()
+    };
+    fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
 
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&data_b64)
@@ -1095,7 +1140,7 @@ fn save_received_file(
     }
 
     let safe_name = sanitize_file_name(&filename);
-    let mut dest = s.received_files_dir.join(&safe_name);
+    let mut dest = target_dir.join(&safe_name);
     if dest.exists() {
         let suffix = epoch_secs();
         let stem = dest
@@ -1108,7 +1153,7 @@ fn save_received_file(
         } else {
             format!("{stem}_{suffix}.{ext}")
         };
-        dest = s.received_files_dir.join(renamed);
+        dest = target_dir.join(renamed);
     }
     fs::write(&dest, bytes).map_err(|e| e.to_string())?;
 
@@ -1130,6 +1175,11 @@ fn save_received_file(
         size_bytes: metadata.len(),
         modified_at,
         sha256: actual_sha256,
+        kind: if is_voicemail {
+            "voicemail".into()
+        } else {
+            "file".into()
+        },
     })
 }
 
@@ -1141,37 +1191,54 @@ fn list_received_files(
     fs::create_dir_all(&s.received_files_dir).map_err(|e| e.to_string())?;
 
     let mut entries = Vec::new();
-    let read_dir = fs::read_dir(&s.received_files_dir).map_err(|e| e.to_string())?;
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    let voicemail_dir = s.received_files_dir.join("voicemails");
+    let mut pending_dirs = vec![s.received_files_dir.clone()];
+
+    while let Some(dir) = pending_dirs.pop() {
+        let read_dir = match fs::read_dir(&dir) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending_dirs.push(path);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let bytes = match fs::read(&path) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let metadata = match fs::metadata(&path) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let modified_at = metadata
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            entries.push(ReceivedFileEntry {
+                file_name: path
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("received_file")
+                    .to_string(),
+                path: path.to_string_lossy().into_owned(),
+                size_bytes: metadata.len(),
+                modified_at,
+                sha256: sha256_hex(&bytes),
+                kind: if path.starts_with(&voicemail_dir) {
+                    "voicemail".into()
+                } else {
+                    "file".into()
+                },
+            });
         }
-        let bytes = match fs::read(&path) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let metadata = match fs::metadata(&path) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let modified_at = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        entries.push(ReceivedFileEntry {
-            file_name: path
-                .file_name()
-                .and_then(|v| v.to_str())
-                .unwrap_or("received_file")
-                .to_string(),
-            path: path.to_string_lossy().into_owned(),
-            size_bytes: metadata.len(),
-            modified_at,
-            sha256: sha256_hex(&bytes),
-        });
     }
 
     entries.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
@@ -1205,6 +1272,30 @@ fn read_received_file(
         data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
         mime_type: guess_mime_from_path(&canonical).to_string(),
     })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn delete_received_file(
+    path: String,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    let base =
+        fs::canonicalize(&s.received_files_dir).unwrap_or_else(|_| s.received_files_dir.clone());
+    let requested = PathBuf::from(path);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        s.received_files_dir.join(requested)
+    };
+    let canonical = fs::canonicalize(&absolute).map_err(|e| e.to_string())?;
+    if !canonical.starts_with(&base) {
+        return Err("Requested file is outside downloads directory".into());
+    }
+    if !canonical.is_file() {
+        return Err("Requested path is not a file".into());
+    }
+    fs::remove_file(&canonical).map_err(|e| e.to_string())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1420,6 +1511,7 @@ pub fn run() {
             send_signal,
             disconnect_signal,
             dial_code,
+            dial_quicdial,
             start_call,
             accept_call,
             end_call,
@@ -1435,6 +1527,7 @@ pub fn run() {
             save_received_file,
             list_received_files,
             read_received_file,
+            delete_received_file,
             get_download_directory,
             set_download_directory,
             init_kyu2_transfer,

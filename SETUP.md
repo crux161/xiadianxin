@@ -38,7 +38,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ## 2. Install Dependencies
 
 ```bash
-cd /Volumes/DevWorkspace/Saffron/XiaDianxin
+cd /Volumes/DevWorkspace/Basil/xiadianxin
 npm install
 ```
 
@@ -46,6 +46,8 @@ This installs:
 - `@douyinfe/semi-ui` + `@douyinfe/semi-icons` — ByteDance Semi Design
 - `@tauri-apps/api` — Tauri v2 frontend API
 - `@tauri-apps/cli` — Tauri dev/build CLI
+- `phoenix` — Omiai websocket client for `resolve_quicdial`
+- `qrcode.react` + `jsqr` — Quicdial QR code generation and scanning
 - React 18, TypeScript 5, Vite 6
 
 ## 3. Development
@@ -61,12 +63,11 @@ npm run dev
 ### What to Expect
 
 1. A native window opens: **虾点心 · XiaDianxin**
-2. The sidebar shows 4 simulated contacts (mDNS-discovered stubs).
-3. **After 5 seconds**, an incoming-call modal rings with pulse animation.
-4. **Accept (video)** → transitions to the Webex-style call view with tally lights.
-5. **Accept (audio)** → transitions to audio-only call view.
-6. **Decline** → transitions to voicemail/recording UI.
-7. Use the sidebar call icons to initiate outbound calls to any online peer.
+2. The sidebar shows discovered peers from mDNS.
+3. The DialPad now opens from a bottom-left expandable drawer (settings/tally area).
+4. The dial input is keypad-only and suppresses iOS native keyboard.
+5. Settings shows your Quicdial QR and DialPad can scan QR via camera or image import.
+6. Outbound dial attempts resolve Quicdial code via Omiai before direct connect handoff.
 
 ### Hot Module Replacement
 
@@ -103,8 +104,10 @@ XiaDianxin/
 │   ├── types/
 │   │   └── call.ts             # Shared TypeScript type definitions
 │   ├── services/
-│   │   └── SankakuBridge.ts    # ★ IPC bridge (invoke + listen)
+│   │   └── SankakuBridge.ts    # ★ IPC + Omiai bridge (resolve_quicdial + direct dial handoff)
 │   └── components/
+│       ├── DialPad.tsx         # ★ Inline drawer dialer + Quicdial QR scan/import
+│       ├── SettingsPanel.tsx   # ★ Profile + Quicdial QR generation
 │       └── CallView.tsx        # ★ Video grid, tally lights, voicemail
 ├── reference/
 │   ├── sankaku/                # Sankaku/RT source (DO NOT MODIFY)
@@ -144,3 +147,12 @@ let stream = sankaku_core::SankakuStream::connect(connection).await?;
 ### Frontend — Video Rendering
 
 The `remoteVideoRef` and `localVideoRef` in `CallView.tsx` are `<video>` elements ready for a `MediaStream`. Alternatively, switch to `<canvas>` and blit decoded RGBA frames received over the IPC bridge.
+
+## 7. Omiai Endpoint Override
+
+Quicdial resolution defaults to `ws://<current-host>:4000/ws/sankaku`.
+To point to another Omiai host:
+
+```bash
+VITE_OMIAI_WS_URL=ws://127.0.0.1:4000/ws/sankaku npm run dev
+```

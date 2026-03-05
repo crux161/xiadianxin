@@ -21,6 +21,15 @@
 │                               │  H.265 video  │  │
 │                               └───────────────┘  │
 └───────────────────────────────────────────────────┘
+
+             ▲
+             │ websocket
+             ▼
+┌───────────────────────────────────────────────────┐
+│                     Omiai                         │
+│  Phoenix Channels · `resolve_quicdial` endpoint  │
+│  Quicdial code -> peer IP runtime registry        │
+└───────────────────────────────────────────────────┘
 ```
 
 ## Features
@@ -35,6 +44,11 @@
 | Reference art in event cards | Implemented |
 | Tally lights (CAM / MIC live indicators) | Implemented |
 | Voicemail recording UI | Implemented |
+| Inline bottom-left expandable Dial drawer | Implemented |
+| iOS-safe keypad input (`readOnly` + `inputMode="none"`) | Implemented |
+| Quicdial QR generation in Settings | Implemented |
+| Quicdial QR scanning (camera + image import) | Implemented |
+| Omiai-backed `resolve_quicdial` before dialing | Implemented |
 | H.265 encoding via Sankaku/RT | Stub (integration point marked) |
 | STUN/TURN matchmaking server | Planned |
 
@@ -43,11 +57,11 @@
 | File | Role |
 |------|------|
 | `src-tauri/src/lib.rs` | Backend — mDNS (mdns-sd), profile persistence, calling codes, stubbed Sankaku transport |
-| `src/services/SankakuBridge.ts` | IPC adapter — wraps all `invoke()` + `listen()` for profiles, peers, calls |
-| `src/App.tsx` | Shell — i18n-wrapped layout, real peer list from mDNS, dial pad, settings |
+| `src/services/SankakuBridge.ts` | IPC + Omiai bridge — `invoke()`/`listen()`, Phoenix socket join, `resolve_quicdial`, direct dial handoff |
+| `src/App.tsx` | Shell — i18n layout, real peer list, bottom-left expandable Dial drawer, settings |
 | `src/components/CallView.tsx` | In-call — real webcam via `getUserMedia`, tally lights, control bar, voicemail |
-| `src/components/SettingsPanel.tsx` | Settings — profile editor, language toggle, avatar picker |
-| `src/components/DialPad.tsx` | Dial — 9-digit keypad with auto-formatting, video/audio call buttons |
+| `src/components/SettingsPanel.tsx` | Settings — profile editor, Quicdial QR display, language toggle, avatar picker |
+| `src/components/DialPad.tsx` | Dial — keypad-only 9-digit input, iOS-safe field attributes, QR scan/import workflow |
 | `src/components/EventCard.tsx` | Cards — reference art integration for notices and idle states |
 | `src/hooks/useMediaDevices.ts` | Hook — webcam/mic access, track toggling, cleanup |
 | `src/i18n/{en,zh}.ts` | String maps — complete English and Chinese translations |
@@ -104,6 +118,23 @@ network appear automatically in the Peers tab.
 
 Default language is **English**. Switch to Chinese in Settings (gear icon in sidebar footer).
 The language preference persists in `profile.json`.
+
+### Omiai WebSocket
+
+By default, Quicdial resolution connects to:
+
+`ws://<current-host>:4000/ws/sankaku`
+
+Override with:
+
+```bash
+VITE_OMIAI_WS_URL=ws://127.0.0.1:4000/ws/sankaku
+```
+
+When you tap call from the DialPad, the app now:
+1. pushes `resolve_quicdial` to Omiai
+2. receives target IP for the entered/scanned Quicdial code
+3. invokes Tauri `dial_quicdial` with both `{code, ip}`
 
 ## Sankaku/RT Integration
 

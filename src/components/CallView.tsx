@@ -53,6 +53,13 @@ function formatDuration(seconds: number): string {
   return `${m}:${s}`;
 }
 
+function isPortraitTouchViewport(): boolean {
+  if (typeof window === "undefined") return false;
+  const isTouch = window.matchMedia("(pointer: coarse)").matches;
+  const isPortrait = window.innerHeight >= window.innerWidth;
+  return isTouch && isPortrait && window.innerWidth <= 900;
+}
+
 const TallyLight: React.FC<{
   label: string;
   live: boolean;
@@ -95,6 +102,12 @@ const CallView: React.FC<Props> = ({
   const [callDuration, setCallDuration] = useState("00:00");
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [showMetrics, setShowMetrics] = useState(false);
+  const [isPortraitCompact, setIsPortraitCompact] = useState<boolean>(() =>
+    isPortraitTouchViewport(),
+  );
+  const [showControlDrawer, setShowControlDrawer] = useState<boolean>(
+    () => !isPortraitTouchViewport(),
+  );
 
   useEffect(() => {
     if (localVideoRef.current && localStream) {
@@ -135,6 +148,19 @@ const CallView: React.FC<Props> = ({
     const tick = setInterval(() => setRecordingDuration((d) => d + 1), 1000);
     return () => clearInterval(tick);
   }, [voicemailRecording]);
+
+  useEffect(() => {
+    const syncViewport = () => {
+      setIsPortraitCompact(isPortraitTouchViewport());
+    };
+    syncViewport();
+    window.addEventListener("resize", syncViewport);
+    return () => window.removeEventListener("resize", syncViewport);
+  }, []);
+
+  useEffect(() => {
+    setShowControlDrawer(!isPortraitCompact);
+  }, [isPortraitCompact, callState]);
 
   const handleStartRecording = useCallback(() => {
     onRecordVoicemail()
@@ -263,9 +289,10 @@ const CallView: React.FC<Props> = ({
   const hasRemoteVideo = !!remoteStream;
   const bitrateMbps = ((metrics?.bitrateBps ?? 0) / 1_000_000).toFixed(2);
   const lossPercent = (metrics?.packetLossPercent ?? 0).toFixed(2);
+  const controlDrawerState = showControlDrawer ? "expanded" : "collapsed";
 
   return (
-    <div className="xdx-call-view">
+    <div className={`xdx-call-view ${isPortraitCompact ? "xdx-call-mobile-portrait" : ""}`}>
       {/* Hidden audio element — ensures remote audio always plays (especially audio-only calls) */}
       <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: "none" }} />
 
@@ -298,20 +325,22 @@ const CallView: React.FC<Props> = ({
           <Text size="small" style={{ color: "rgba(255,255,255,0.3)" }}>
             {activeCall.peerName}
           </Text>
-          <Tooltip
-            content={showMetrics ? "Hide metrics" : "Show metrics"}
-            position="top"
-          >
-            <Button
-              aria-label={showMetrics ? "Hide metrics" : "Show metrics"}
-              theme="borderless"
-              type="tertiary"
-              icon={<IconSetting size="small" />}
-              size="small"
-              className={`xdx-metrics-toggle ${showMetrics ? "active" : ""}`}
-              onClick={() => setShowMetrics((prev) => !prev)}
-            />
-          </Tooltip>
+          {!isPortraitCompact && (
+            <Tooltip
+              content={showMetrics ? "Hide metrics" : "Show metrics"}
+              position="top"
+            >
+              <Button
+                aria-label={showMetrics ? "Hide metrics" : "Show metrics"}
+                theme="borderless"
+                type="tertiary"
+                icon={<IconSetting size="small" />}
+                size="small"
+                className={`xdx-metrics-toggle ${showMetrics ? "active" : ""}`}
+                onClick={() => setShowMetrics((prev) => !prev)}
+              />
+            </Tooltip>
+          )}
         </div>
         <TallyLight
           label={micOn ? t("call.micLive") : t("call.micOff")}
@@ -448,8 +477,24 @@ const CallView: React.FC<Props> = ({
       </div>
 
       {/* Control bar */}
+      {isPortraitCompact && (
+        <button
+          type="button"
+          className={`xdx-call-controls-toggle ${controlDrawerState}`}
+          onClick={() => setShowControlDrawer((prev) => !prev)}
+          aria-label={
+            showControlDrawer ? t("call.hideControls") : t("call.showControls")
+          }
+        >
+          <IconSetting size="large" />
+        </button>
+      )}
       {isAudioOnlyCall ? (
-        <div className="xdx-control-bar xdx-control-bar-audio">
+        <div
+          className={`xdx-control-bar xdx-control-bar-audio ${
+            isPortraitCompact ? `xdx-control-bar-floating ${controlDrawerState}` : ""
+          }`}
+        >
           <div className="xdx-control-bar-inner xdx-control-bar-inner-audio">
             <Tooltip
               content={micOn ? t("call.mute") : t("call.unmute")}
@@ -463,6 +508,17 @@ const CallView: React.FC<Props> = ({
                 {!micOn && <span className="xdx-slash-overlay" />}
               </button>
             </Tooltip>
+            <Tooltip content={t("chat.title")} position="top">
+              <button
+                className={`xdx-ctrl-btn xdx-ctrl-btn-audio ${chatOpen ? "active" : ""}`}
+                onClick={onToggleChat}
+              >
+                <IconComment size="extra-large" />
+                {unreadChat > 0 && (
+                  <span className="xdx-unread-badge">{unreadChat}</span>
+                )}
+              </button>
+            </Tooltip>
             <Tooltip content={t("call.endCall")} position="top">
               <button
                 className="xdx-ctrl-btn xdx-btn-end xdx-ctrl-btn-audio xdx-ctrl-btn-audio-end"
@@ -474,7 +530,11 @@ const CallView: React.FC<Props> = ({
           </div>
         </div>
       ) : (
-        <div className="xdx-control-bar">
+        <div
+          className={`xdx-control-bar ${
+            isPortraitCompact ? `xdx-control-bar-floating ${controlDrawerState}` : ""
+          }`}
+        >
           <div className="xdx-control-bar-inner">
             <Tooltip
               content={micOn ? t("call.mute") : t("call.unmute")}
@@ -511,11 +571,13 @@ const CallView: React.FC<Props> = ({
                 )}
               </button>
             </Tooltip>
-            <Tooltip content={t("call.shareScreen")} position="top">
-              <button className="xdx-ctrl-btn">
-                <IconDesktop size="extra-large" />
-              </button>
-            </Tooltip>
+            {!isPortraitCompact && (
+              <Tooltip content={t("call.shareScreen")} position="top">
+                <button className="xdx-ctrl-btn">
+                  <IconDesktop size="extra-large" />
+                </button>
+              </Tooltip>
+            )}
             <Tooltip content={t("call.endCall")} position="top">
               <button className="xdx-ctrl-btn xdx-btn-end" onClick={onEndCall}>
                 <IconClose size="extra-large" />

@@ -19,7 +19,6 @@ import {
   IconMicrophone,
   IconPhone,
   IconDownload,
-  IconUserAdd,
 } from "@douyinfe/semi-icons";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { I18nProvider, useI18n } from "./i18n/index";
@@ -36,6 +35,11 @@ import ChatPanel from "./components/ChatPanel";
 import SettingsPanel, { AVATAR_MAP } from "./components/SettingsPanel";
 import DialPad from "./components/DialPad";
 import EventCard from "./components/EventCard";
+import FriendProfileModal from "./components/FriendProfileModal";
+import FriendRequestDialog, {
+  type PendingFriendRequest,
+} from "./components/FriendRequestDialog";
+import VoicemailPlayer from "./components/VoicemailPlayer";
 import {
   CallState,
   type ActiveCallInfo,
@@ -310,13 +314,14 @@ const AppInner: React.FC = () => {
   const typingThrottleRef = useRef<number>(0);
 
   const [friends, setFriends] = useState<Friend[]>([]);
-  const [pendingFriendRequest, setPendingFriendRequest] = useState<{
-    callingCode: string;
-    displayName: string;
-    avatarId?: string;
-    publicKey?: string;
-    voicemailKey?: string;
-  } | null>(null);
+  const [pendingFriendRequest, setPendingFriendRequest] =
+    useState<PendingFriendRequest | null>(null);
+  const [friendProfilePeer, setFriendProfilePeer] = useState<DiscoveredPeer | null>(
+    null,
+  );
+  const [blockedPeerCodes, setBlockedPeerCodes] = useState<Set<string>>(
+    new Set(),
+  );
   const [customAvatarUrl, setCustomAvatarUrl] = useState<string | null>(null);
   const [fileTransfers, setFileTransfers] = useState<
     Map<string, FileTransferProgress>
@@ -332,9 +337,6 @@ const AppInner: React.FC = () => {
   const [downloadDirectoryInfo, setDownloadDirectoryInfo] =
     useState<DownloadDirectoryInfo | null>(null);
   const [voicemailUnread, setVoicemailUnread] = useState(0);
-  const [activeVoicemailPath, setActiveVoicemailPath] = useState<string | null>(
-    null,
-  );
   const voicemailUrlsRef = useRef<Map<string, string>>(new Map());
   const [callMetrics, setCallMetrics] = useState<CallNetworkMetrics | null>(
     null,
@@ -347,6 +349,9 @@ const AppInner: React.FC = () => {
   const voicemailRecorderRef = useRef<MediaRecorder | null>(null);
   const voicemailChunksRef = useRef<BlobPart[]>([]);
   const [voicemailRecording, setVoicemailRecording] = useState(false);
+  const [heardVoicemailPaths, setHeardVoicemailPaths] = useState<Set<string>>(
+    new Set(),
+  );
 
   useEffect(() => {
     fileTransfersRef.current = fileTransfers;
@@ -355,6 +360,41 @@ const AppInner: React.FC = () => {
   useEffect(() => {
     connectedPeerRef.current = connectedPeer;
   }, [connectedPeer]);
+
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem("xdx-blocked-peers");
+      if (stored) {
+        const parsed = JSON.parse(stored) as string[];
+        setBlockedPeerCodes(new Set(parsed));
+      }
+    } catch {
+      /* ignore */
+    }
+    try {
+      const stored = window.localStorage.getItem("xdx-heard-voicemails");
+      if (stored) {
+        const parsed = JSON.parse(stored) as string[];
+        setHeardVoicemailPaths(new Set(parsed));
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "xdx-blocked-peers",
+      JSON.stringify(Array.from(blockedPeerCodes)),
+    );
+  }, [blockedPeerCodes]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "xdx-heard-voicemails",
+      JSON.stringify(Array.from(heardVoicemailPaths)),
+    );
+  }, [heardVoicemailPaths]);
 
   useEffect(() => {
     if (sidebarTab === "voicemail") {
@@ -388,6 +428,14 @@ const AppInner: React.FC = () => {
       return friends.find((f) => f.callingCode === code && f.approved);
     },
     [friends],
+  );
+
+  const isBlockedPeer = useCallback(
+    (code?: string | null) => {
+      if (!code) return false;
+      return blockedPeerCodes.has(code);
+    },
+    [blockedPeerCodes],
   );
 
   useEffect(() => {
@@ -646,7 +694,9 @@ const AppInner: React.FC = () => {
         }
       }
 
-      let saved: DownloadedFileEntry | null = null;
+      const savedKind: "file" | "voicemail" =
+        transfer.kind === "voicemail" ? "voicemail" : "file";
+      let saved: DownloadedFileEntry;
       if (isTauriRuntime()) {
         const fullB64 = bytesToBase64(bytesToSave);
         const backendExpectedSha =
@@ -655,6 +705,7 @@ const AppInner: React.FC = () => {
           transfer.fileName,
           fullB64,
           backendExpectedSha,
+          savedKind,
         );
       } else {
         const mimeType = guessMimeByFileName(transfer.fileName);
@@ -669,8 +720,9 @@ const AppInner: React.FC = () => {
           sizeBytes: bytesToSave.byteLength,
           modifiedAt: Math.floor(Date.now() / 1000),
           sha256: await sha256Hex(bytesToSave),
+          kind: savedKind,
         };
-        setDownloads((prev) => [saved!, ...prev]);
+        setDownloads((prev) => [saved, ...prev]);
       }
 
       const receivedLabel =
@@ -767,6 +819,15 @@ const AppInner: React.FC = () => {
 
   useEffect(() => {
     const unsub = bridge.current.onSignalingMessage((msg: SignalMessage) => {
+      const senderCode =
+        "callingCode" in msg
+          ? msg.callingCode
+          : msg.type === "file-offer"
+            ? msg.fromCode
+            : undefined;
+      if (isBlockedPeer(senderCode)) {
+        return;
+      }
       switch (msg.type) {
         case "offer":
           setConnectedPeer({
@@ -917,10 +978,6 @@ const AppInner: React.FC = () => {
               const sharedKey = friend?.voicemailKey ?? null;
               const keyOk = !!sharedKey && !!msg.voicemailAuth && sharedKey === msg.voicemailAuth;
               if (!keyOk) {
-                bridge.current
-                  .sendSignal({ type: "file-reject", fileId: msg.fileId })
-                  .catch(() => {});
-                Toast.warning({ content: t("voicemail.unauthorized") });
                 return;
               }
 
@@ -933,10 +990,6 @@ const AppInner: React.FC = () => {
               ) {
                 const ageMs = Math.abs(Date.now() - msg.voicemailIssuedAt);
                 if (ageMs > 60_000) {
-                  bridge.current
-                    .sendSignal({ type: "file-reject", fileId: msg.fileId })
-                    .catch(() => {});
-                  Toast.warning({ content: t("voicemail.unauthorized") });
                   return;
                 }
                 const expectedTicket = await buildVoicemailTicket({
@@ -946,10 +999,6 @@ const AppInner: React.FC = () => {
                   nonce: msg.voicemailNonce,
                 });
                 if (expectedTicket !== msg.voicemailTicket) {
-                  bridge.current
-                    .sendSignal({ type: "file-reject", fileId: msg.fileId })
-                    .catch(() => {});
-                  Toast.warning({ content: t("voicemail.unauthorized") });
                   return;
                 }
               }
@@ -991,9 +1040,6 @@ const AppInner: React.FC = () => {
           };
           processOffer().catch((err) => {
             console.error("[XDX] file-offer validation failed", err);
-            bridge.current
-              .sendSignal({ type: "file-reject", fileId: msg.fileId })
-              .catch(() => {});
           });
           break;
         }
@@ -1084,7 +1130,7 @@ const AppInner: React.FC = () => {
       }
     });
     return unsub;
-  }, [finalizeIncomingTransfer, getFriendByCode, profile, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [finalizeIncomingTransfer, getFriendByCode, isBlockedPeer, profile, t]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cleanupCall = useCallback(() => {
     const recorder = voicemailRecorderRef.current;
@@ -1477,6 +1523,80 @@ const AppInner: React.FC = () => {
     bridge.current.sendSignal({ type: "decline" }).catch(() => {});
   }, []);
 
+  const handleRequestFriend = useCallback(async () => {
+    const peer = friendProfilePeer;
+    if (!peer) return;
+    if (isBlockedPeer(peer.callingCode)) {
+      Toast.warning({ content: t("friends.unblockFirst") });
+      return;
+    }
+    try {
+      if (connectedPeer?.code !== peer.callingCode) {
+        const result = await bridge.current.connectToPeer(peer.callingCode);
+        if (!result.success) {
+          Toast.warning({ content: result.message });
+          return;
+        }
+        setConnectedPeer({ name: peer.displayName, code: peer.callingCode });
+      }
+      const prof = profile ?? (await bridge.current.getProfile());
+      await bridge.current.sendSignal({
+        type: "friend-request",
+        callingCode: prof.callingCode,
+        displayName: prof.displayName,
+        avatarId: prof.avatarId,
+      });
+      setFriendProfilePeer(null);
+      Toast.success({ content: t("friends.requestSent") });
+    } catch (err) {
+      Toast.error({ content: `${err}` });
+    }
+  }, [connectedPeer, friendProfilePeer, isBlockedPeer, profile, t]);
+
+  const handleRemoveFriend = useCallback(async () => {
+    const peer = friendProfilePeer;
+    if (!peer) return;
+    try {
+      await bridge.current.removeFriend(peer.callingCode);
+      setFriends((prev) =>
+        prev.filter((friend) => friend.callingCode !== peer.callingCode),
+      );
+      setFriendProfilePeer(null);
+      Toast.info({ content: t("friends.removed") });
+    } catch (err) {
+      Toast.error({ content: `${err}` });
+    }
+  }, [friendProfilePeer, t]);
+
+  const handleToggleBlock = useCallback(async () => {
+    const peer = friendProfilePeer;
+    if (!peer) return;
+    const code = peer.callingCode;
+    const willBlock = !blockedPeerCodes.has(code);
+
+    setBlockedPeerCodes((prev) => {
+      const next = new Set(prev);
+      if (willBlock) {
+        next.add(code);
+      } else {
+        next.delete(code);
+      }
+      return next;
+    });
+
+    if (willBlock) {
+      setFriends((prev) => prev.filter((friend) => friend.callingCode !== code));
+      bridge.current.removeFriend(code).catch(() => {});
+      if (connectedPeer?.code === code) {
+        handleDisconnectChat();
+      }
+      Toast.info({ content: t("friends.blockedToast") });
+    } else {
+      Toast.info({ content: t("friends.unblockedToast") });
+    }
+    setFriendProfilePeer(null);
+  }, [blockedPeerCodes, connectedPeer, friendProfilePeer, handleDisconnectChat, t]);
+
   const sendTransfer = useCallback(
     async (opts: {
       fileName: string;
@@ -1822,19 +1942,6 @@ const AppInner: React.FC = () => {
     [],
   );
 
-  const handlePlayVoicemail = useCallback(
-    async (entry: DownloadedFileEntry) => {
-      try {
-        await resolveDownloadUrl(entry);
-        setActiveVoicemailPath(entry.path);
-      } catch (err) {
-        console.error("[XDX] load voicemail playback failed", err);
-        Toast.error({ content: `${err}` });
-      }
-    },
-    [resolveDownloadUrl],
-  );
-
   const handleOpenDownloadedFile = useCallback(
     async (entry: DownloadedFileEntry) => {
       try {
@@ -1959,8 +2066,7 @@ const AppInner: React.FC = () => {
   }, [callState]);
 
   const friendCodeSet = new Set(friends.map((f) => f.callingCode));
-
-  const filteredPeers = (searchQuery
+  const searchedPeers = (searchQuery
     ? peers.filter(
         (p) =>
           p.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -1969,19 +2075,23 @@ const AppInner: React.FC = () => {
     : peers
   )
     .slice()
-    .sort((a, b) => {
-      const aFriend = friendCodeSet.has(a.callingCode) ? 0 : 1;
-      const bFriend = friendCodeSet.has(b.callingCode) ? 0 : 1;
-      if (aFriend !== bFriend) return aFriend - bFriend;
-      return a.displayName.localeCompare(b.displayName);
-    });
+    .sort((a, b) => a.displayName.localeCompare(b.displayName));
+  const friendPeers = searchedPeers.filter(
+    (peer) =>
+      friendCodeSet.has(peer.callingCode) && !blockedPeerCodes.has(peer.callingCode),
+  );
+  const normalPeers = searchedPeers.filter(
+    (peer) =>
+      !friendCodeSet.has(peer.callingCode) && !blockedPeerCodes.has(peer.callingCode),
+  );
+  const blockedPeers = searchedPeers.filter((peer) =>
+    blockedPeerCodes.has(peer.callingCode),
+  );
 
   // -- Render sidebar --
   const renderSidebar = () => {
     const ownAvatar = getAvatarSrc(profile?.avatarId) ?? foxBandana;
-    const voicemailEntries = downloads.filter((entry) =>
-      entry.fileName.startsWith("voicemail_"),
-    );
+    const voicemailEntries = downloads.filter((entry) => entry.kind === "voicemail");
     const sidebarTabs: Array<{
       key: SidebarTab;
       icon: React.ReactNode;
@@ -2069,7 +2179,7 @@ const AppInner: React.FC = () => {
                     {t("sidebar.connecting")}
                   </Text>
                 </div>
-              ) : filteredPeers.length === 0 && searchQuery ? (
+              ) : searchedPeers.length === 0 && searchQuery ? (
                 <div className="xdx-no-peers">
                   <Text
                     style={{
@@ -2082,7 +2192,7 @@ const AppInner: React.FC = () => {
                     No matches for "{searchQuery}"
                   </Text>
                 </div>
-              ) : filteredPeers.length === 0 ? (
+              ) : searchedPeers.length === 0 ? (
                 <div className="xdx-no-peers">
                   <EventCard
                     image={foxSleeping}
@@ -2091,59 +2201,154 @@ const AppInner: React.FC = () => {
                   />
                 </div>
               ) : (
-                filteredPeers.map((peer) => (
-                  <div key={peer.callingCode} className="xdx-contact-item">
-                    <div className="xdx-contact-avatar">
-                      <Avatar
-                        src={getAvatarSrc(getFriendByCode(peer.callingCode)?.avatarId)}
-                        size="small"
-                        style={{
-                          background:
-                            "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-                        }}
+                <>
+                  {friendPeers.length > 0 && (
+                    <Text className="xdx-peer-group-label">{t("friends.friend")}</Text>
+                  )}
+                  {friendPeers.map((peer) => (
+                    <div key={peer.callingCode} className="xdx-contact-item">
+                      <button
+                        type="button"
+                        className="xdx-contact-avatar xdx-contact-profile-btn"
+                        onClick={() => setFriendProfilePeer(peer)}
                       >
-                        {peer.displayName.charAt(0)}
-                      </Avatar>
-                      <span className="xdx-status-dot online" />
-                    </div>
-                    <div className="xdx-contact-main">
-                      <div className="xdx-contact-info">
-                        <Text className="xdx-contact-name">{peer.displayName}</Text>
-                        <Text size="small" className="xdx-contact-status">
-                          {peer.callingCode} · {t("sidebar.online")}
-                        </Text>
-                      </div>
-                      {callState === CallState.Idle && (
-                        <div className="xdx-contact-actions">
-                          <Tooltip content={t("chat.title")} position="top">
-                            <button
-                              className="xdx-action-btn"
-                              onClick={() => handleOpenChat(peer)}
-                            >
-                              <IconComment size="small" />
-                            </button>
-                          </Tooltip>
-                          <Tooltip content={t("dialpad.callVideo")} position="top">
-                            <button
-                              className="xdx-action-btn"
-                              onClick={() => handleStartCallFromPeer(peer, false)}
-                            >
-                              <IconCamera size="small" />
-                            </button>
-                          </Tooltip>
-                          <Tooltip content={t("dialpad.callAudio")} position="top">
-                            <button
-                              className="xdx-action-btn"
-                              onClick={() => handleStartCallFromPeer(peer, true)}
-                            >
-                              <IconMicrophone size="small" />
-                            </button>
-                          </Tooltip>
+                        <Avatar
+                          src={getAvatarSrc(getFriendByCode(peer.callingCode)?.avatarId)}
+                          size="small"
+                          style={{
+                            background:
+                              "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                          }}
+                        >
+                          {peer.displayName.charAt(0)}
+                        </Avatar>
+                        <span className="xdx-status-dot online" />
+                      </button>
+                      <div className="xdx-contact-main">
+                        <div className="xdx-contact-info">
+                          <Text className="xdx-contact-name">{peer.displayName}</Text>
+                          <span className="xdx-peer-badge friend">{t("friends.friend")}</span>
+                          <Text size="small" className="xdx-contact-status">
+                            {peer.callingCode} · {t("sidebar.online")}
+                          </Text>
                         </div>
-                      )}
+                        {callState === CallState.Idle && (
+                          <div className="xdx-contact-actions">
+                            <Tooltip content={t("chat.title")} position="top">
+                              <button
+                                className="xdx-action-btn"
+                                onClick={() => handleOpenChat(peer)}
+                              >
+                                <IconComment size="small" />
+                              </button>
+                            </Tooltip>
+                            <Tooltip content={t("dialpad.callVideo")} position="top">
+                              <button
+                                className="xdx-action-btn"
+                                onClick={() => handleStartCallFromPeer(peer, false)}
+                              >
+                                <IconCamera size="small" />
+                              </button>
+                            </Tooltip>
+                            <Tooltip content={t("dialpad.callAudio")} position="top">
+                              <button
+                                className="xdx-action-btn"
+                                onClick={() => handleStartCallFromPeer(peer, true)}
+                              >
+                                <IconMicrophone size="small" />
+                              </button>
+                            </Tooltip>
+                          </div>
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))}
+                  {normalPeers.length > 0 && (
+                    <Text className="xdx-peer-group-label">{t("friends.peer")}</Text>
+                  )}
+                  {normalPeers.map((peer) => (
+                    <div key={peer.callingCode} className="xdx-contact-item">
+                      <button
+                        type="button"
+                        className="xdx-contact-avatar xdx-contact-profile-btn"
+                        onClick={() => setFriendProfilePeer(peer)}
+                      >
+                        <Avatar
+                          src={getAvatarSrc(getFriendByCode(peer.callingCode)?.avatarId)}
+                          size="small"
+                          style={{
+                            background:
+                              "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                          }}
+                        >
+                          {peer.displayName.charAt(0)}
+                        </Avatar>
+                        <span className="xdx-status-dot online" />
+                      </button>
+                      <div className="xdx-contact-main">
+                        <div className="xdx-contact-info">
+                          <Text className="xdx-contact-name">{peer.displayName}</Text>
+                          <span className="xdx-peer-badge peer">{t("friends.peer")}</span>
+                          <Text size="small" className="xdx-contact-status">
+                            {peer.callingCode} · {t("sidebar.online")}
+                          </Text>
+                        </div>
+                        {callState === CallState.Idle && (
+                          <div className="xdx-contact-actions">
+                            <Tooltip content={t("chat.title")} position="top">
+                              <button
+                                className="xdx-action-btn"
+                                onClick={() => handleOpenChat(peer)}
+                              >
+                                <IconComment size="small" />
+                              </button>
+                            </Tooltip>
+                            <Tooltip content={t("dialpad.callVideo")} position="top">
+                              <button
+                                className="xdx-action-btn"
+                                onClick={() => handleStartCallFromPeer(peer, false)}
+                              >
+                                <IconCamera size="small" />
+                              </button>
+                            </Tooltip>
+                            <Tooltip content={t("dialpad.callAudio")} position="top">
+                              <button
+                                className="xdx-action-btn"
+                                onClick={() => handleStartCallFromPeer(peer, true)}
+                              >
+                                <IconMicrophone size="small" />
+                              </button>
+                            </Tooltip>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {blockedPeers.length > 0 && (
+                    <Text className="xdx-peer-group-label">{t("friends.blocked")}</Text>
+                  )}
+                  {blockedPeers.map((peer) => (
+                    <div key={peer.callingCode} className="xdx-contact-item blocked">
+                      <button
+                        type="button"
+                        className="xdx-contact-avatar xdx-contact-profile-btn"
+                        onClick={() => setFriendProfilePeer(peer)}
+                      >
+                        <Avatar size="small">{peer.displayName.charAt(0)}</Avatar>
+                        <span className="xdx-status-dot" />
+                      </button>
+                      <div className="xdx-contact-main">
+                        <div className="xdx-contact-info">
+                          <Text className="xdx-contact-name">{peer.displayName}</Text>
+                          <span className="xdx-peer-badge blocked">{t("friends.blocked")}</span>
+                          <Text size="small" className="xdx-contact-status">
+                            {peer.callingCode}
+                          </Text>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </>
               )}
             </>
           )}
@@ -2159,45 +2364,47 @@ const AppInner: React.FC = () => {
                   />
                 </div>
               ) : (
-                voicemailEntries.map((entry) => (
-                  <div key={entry.path} className="xdx-download-item voicemail">
-                    <div className="xdx-download-main">
-                      <div className="xdx-download-name" title={entry.fileName}>
-                        {entry.fileName}
-                      </div>
-                      <div className="xdx-download-meta">
-                        {formatFileSize(entry.sizeBytes)} ·{" "}
-                        {formatShortTime(entry.modifiedAt)}
-                      </div>
-                      <div className="xdx-download-hash">
-                        SHA-256: {entry.sha256.slice(0, 16)}...
-                      </div>
-                      {activeVoicemailPath === entry.path &&
-                        voicemailUrlsRef.current.get(entry.path) && (
-                          <audio
-                            className="xdx-voicemail-player"
-                            controls
-                            preload="metadata"
-                            src={voicemailUrlsRef.current.get(entry.path)}
-                          />
-                        )}
-                    </div>
-                    <button
-                      className="xdx-download-open"
-                      onClick={() => {
-                        if (activeVoicemailPath === entry.path) {
-                          setActiveVoicemailPath(null);
-                        } else {
-                          void handlePlayVoicemail(entry);
-                        }
-                      }}
-                    >
-                      {activeVoicemailPath === entry.path
-                        ? t("voicemail.hidePlayer")
-                        : t("voicemail.play")}
-                    </button>
-                  </div>
-                ))
+                <VoicemailPlayer
+                  entries={voicemailEntries}
+                  friends={friends}
+                  heardPaths={heardVoicemailPaths}
+                  getAvatarSrc={getAvatarSrc}
+                  resolvePlaybackUrl={resolveDownloadUrl}
+                  onMarkHeard={(path) =>
+                    setHeardVoicemailPaths((prev) => {
+                      const next = new Set(prev);
+                      next.add(path);
+                      return next;
+                    })
+                  }
+                  onDelete={async (entry) => {
+                    try {
+                      if (isTauriRuntime()) {
+                        await bridge.current.deleteReceivedFile(entry.path);
+                      } else {
+                        setDownloads((prev) =>
+                          prev.filter((candidate) => candidate.path !== entry.path),
+                        );
+                      }
+                      const url = voicemailUrlsRef.current.get(entry.path);
+                      if (url) {
+                        URL.revokeObjectURL(url);
+                        voicemailUrlsRef.current.delete(entry.path);
+                      }
+                      setHeardVoicemailPaths((prev) => {
+                        if (!prev.has(entry.path)) return prev;
+                        const next = new Set(prev);
+                        next.delete(entry.path);
+                        return next;
+                      });
+                      if (isTauriRuntime()) {
+                        refreshDownloads();
+                      }
+                    } catch (err) {
+                      Toast.error({ content: `${err}` });
+                    }
+                  }}
+                />
               )}
             </div>
           )}
@@ -2240,23 +2447,68 @@ const AppInner: React.FC = () => {
           )}
         </div>
 
-        <div className="xdx-sidebar-footer">
-          <Tooltip content={t("sidebar.settings")} position="top">
-            <button
-              className="xdx-footer-btn"
-              onClick={() => setSettingsOpen(true)}
-            >
-              <IconSetting size="small" />
-            </button>
-          </Tooltip>
-          <div className="xdx-core-status">
-            <span className={`xdx-engine-dot ${coreReady ? "ready" : ""}`} />
-            <Text
-              size="small"
-              style={{ color: "rgba(255,255,255,0.45)", fontSize: 11 }}
-            >
-              {coreReady ? t("sidebar.engineReady") : t("sidebar.engineOffline")}
-            </Text>
+        <div
+          className={`xdx-sidebar-footer xdx-footer-dial-anchor ${
+            dialPadOpen ? "dial-open" : ""
+          }`}
+          onClick={() => setDialPadOpen((open) => !open)}
+        >
+          <div className="xdx-sidebar-footer-main">
+            <Tooltip content={t("sidebar.settings")} position="top">
+              <button
+                className="xdx-footer-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSettingsOpen(true);
+                }}
+              >
+                <IconSetting size="small" />
+              </button>
+            </Tooltip>
+            <div className="xdx-core-status">
+              <span className={`xdx-engine-dot ${coreReady ? "ready" : ""}`} />
+              <Text
+                size="small"
+                style={{ color: "rgba(255,255,255,0.45)", fontSize: 11 }}
+              >
+                {coreReady ? t("sidebar.engineReady") : t("sidebar.engineOffline")}
+              </Text>
+            </div>
+            <Tooltip content={t("sidebar.dial")} position="top">
+              <button
+                className={`xdx-footer-btn xdx-footer-btn-dial ${dialPadOpen ? "active" : ""}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDialPadOpen((open) => !open);
+                }}
+              >
+                <IconPhone size="small" />
+              </button>
+            </Tooltip>
+          </div>
+
+          <div
+            className={`xdx-sidebar-dial-drawer ${dialPadOpen ? "open" : ""}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="xdx-sidebar-dial-drawer-header">
+              <Text className="xdx-sidebar-dial-drawer-title">{t("dialpad.title")}</Text>
+              <button
+                className="xdx-sidebar-dial-drawer-close"
+                onClick={() => setDialPadOpen(false)}
+              >
+                <IconClose size="small" />
+              </button>
+            </div>
+            {profile && (
+              <DialPad
+                callingCode={profile.callingCode}
+                onCallStarted={(result, audioOnly) => {
+                  setDialPadOpen(false);
+                  void handleDialCallStarted(result, audioOnly);
+                }}
+              />
+            )}
           </div>
         </div>
 
@@ -2267,7 +2519,7 @@ const AppInner: React.FC = () => {
                 <button
                   type="button"
                   className="xdx-tab xdx-tab-dial-action"
-                  onClick={() => setDialPadOpen(true)}
+                  onClick={() => setDialPadOpen((open) => !open)}
                 >
                   <IconPhone size="small" />
                   <span>{t("sidebar.dial")}</span>
@@ -2560,83 +2812,27 @@ const AppInner: React.FC = () => {
         )}
       </Modal>
 
-      {/* Friend Request Modal */}
-      <Modal
-        visible={!!pendingFriendRequest}
-        closable={false}
-        footer={null}
-        centered
-        maskClosable={false}
-        className="xdx-incoming-modal"
-        width={360}
-        maskStyle={{
-          backdropFilter: "blur(12px)",
-          background: "rgba(0,0,0,0.5)",
-        }}
-      >
-        {pendingFriendRequest && (
-          <div className="xdx-friend-request-modal">
-            <Avatar
-              size="extra-large"
-              style={{
-                background:
-                  "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-                marginBottom: 16,
-              }}
-            >
-              {pendingFriendRequest.displayName.charAt(0)}
-            </Avatar>
-            <Title heading={4} style={{ color: "#fff", margin: "8px 0 4px" }}>
-              {pendingFriendRequest.displayName}
-            </Title>
-            <Text style={{ color: "rgba(255,255,255,0.45)", fontSize: 13 }}>
-              {t("friends.requestDesc")}
-            </Text>
-            <Text
-              size="small"
-              style={{
-                color: "rgba(255,255,255,0.3)",
-                display: "block",
-                margin: "4px 0 20px",
-              }}
-            >
-              {pendingFriendRequest.callingCode}
-            </Text>
-            <div style={{ display: "flex", gap: 12, justifyContent: "center" }}>
-              <button className="xdx-btn-decline" onClick={handleDenyFriend}>
-                <IconClose size="large" />
-              </button>
-              <button className="xdx-btn-accept" onClick={handleApproveFriend}>
-                <IconUserAdd size="large" />
-              </button>
-            </div>
-          </div>
-        )}
-      </Modal>
+      <FriendRequestDialog
+        request={pendingFriendRequest}
+        onAccept={handleApproveFriend}
+        onDecline={handleDenyFriend}
+      />
 
-      <Modal
-        visible={dialPadOpen}
-        title={t("dialpad.title")}
-        footer={null}
-        centered
-        onCancel={() => setDialPadOpen(false)}
-        className="xdx-incoming-modal xdx-dial-modal"
-        width={420}
-        maskStyle={{
-          backdropFilter: "blur(14px)",
-          background: "rgba(0,0,0,0.52)",
+      <FriendProfileModal
+        peer={friendProfilePeer}
+        friend={getFriendByCode(friendProfilePeer?.callingCode ?? null)}
+        blocked={isBlockedPeer(friendProfilePeer?.callingCode ?? null)}
+        onClose={() => setFriendProfilePeer(null)}
+        onRequestFriend={() => {
+          void handleRequestFriend();
         }}
-      >
-        {profile && (
-          <DialPad
-            callingCode={profile.callingCode}
-            onCallStarted={(result, audioOnly) => {
-              setDialPadOpen(false);
-              void handleDialCallStarted(result, audioOnly);
-            }}
-          />
-        )}
-      </Modal>
+        onRemoveFriend={() => {
+          void handleRemoveFriend();
+        }}
+        onToggleBlock={() => {
+          void handleToggleBlock();
+        }}
+      />
 
       <SettingsPanel
         open={settingsOpen}

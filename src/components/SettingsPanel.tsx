@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Button, Input, Typography, Toast, Radio, RadioGroup, Avatar } from "@douyinfe/semi-ui";
 import { IconClose, IconUpload } from "@douyinfe/semi-icons";
+import { QRCodeSVG } from "qrcode.react";
 import { useI18n } from "../i18n/index";
 import type {
   DownloadDirectoryInfo,
@@ -176,6 +177,28 @@ const SettingsPanel: React.FC<Props> = ({
               <button className="xdx-code-copy" onClick={handleCopyCode}>
                 {codeCopied ? t("idle.copied") : t("idle.copyCode")}
               </button>
+            </div>
+          </div>
+
+          <div className="xdx-settings-section">
+            <Text className="xdx-settings-label">{t("settings.quicdialQr")}</Text>
+            <div className="xdx-quicdial-qr-card">
+              <div className="xdx-quicdial-qr-image">
+                <QRCodeSVG
+                  value={profile?.callingCode || "unavailable"}
+                  size={148}
+                  bgColor="#ffffff"
+                  fgColor="#111827"
+                  level="M"
+                  includeMargin={true}
+                />
+              </div>
+              <Text className="xdx-quicdial-qr-code">
+                {profile?.callingCode ?? "---"}
+              </Text>
+              <Text size="small" className="xdx-quicdial-qr-hint">
+                {t("settings.quicdialHint")}
+              </Text>
             </div>
           </div>
 

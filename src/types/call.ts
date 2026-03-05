@@ -103,6 +103,7 @@ export interface DownloadedFileEntry {
   sizeBytes: number;
   modifiedAt: number;
   sha256: string;
+  kind: "file" | "voicemail";
 }
 
 export interface DownloadDirectoryInfo {

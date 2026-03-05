@@ -455,9 +455,61 @@ body {
   background: var(--xdx-bg-active);
 }
 
+.xdx-contact-item.blocked {
+  opacity: 0.72;
+}
+
+.xdx-peer-group-label {
+  display: block;
+  margin: 12px 8px 6px;
+  color: rgba(255, 255, 255, 0.42) !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+}
+
+.xdx-peer-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.3;
+  letter-spacing: 0.2px;
+}
+
+.xdx-peer-badge.friend {
+  color: #d8eeff;
+  background: rgba(48, 134, 255, 0.24);
+  border: 1px solid rgba(115, 184, 255, 0.35);
+}
+
+.xdx-peer-badge.peer {
+  color: rgba(255, 255, 255, 0.76);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.xdx-peer-badge.blocked {
+  color: #ffd4dd;
+  background: rgba(255, 71, 87, 0.22);
+  border: 1px solid rgba(255, 120, 134, 0.32);
+}
+
 .xdx-contact-avatar {
   position: relative;
   flex-shrink: 0;
+}
+
+.xdx-contact-profile-btn {
+  border: none;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
 }
 
 .xdx-status-dot {
@@ -547,9 +599,6 @@ body {
 
 /* ---- Sidebar Footer ---- */
 .xdx-sidebar-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   margin-top: auto;
   padding: 12px 14px 90px;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
@@ -557,6 +606,27 @@ body {
     rgba(122, 141, 255, 0.08) 0%,
     transparent 100%);
   -webkit-app-region: no-drag;
+  position: relative;
+  z-index: 15;
+}
+
+.xdx-sidebar-footer-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xdx-footer-dial-anchor {
+  border-radius: 16px 16px 0 0;
+  transition: background var(--xdx-transition), border-color var(--xdx-transition);
+  cursor: pointer;
+}
+.xdx-footer-dial-anchor:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+.xdx-footer-dial-anchor.dial-open {
+  border-top-color: rgba(122, 141, 255, 0.18);
 }
 
 .xdx-footer-btn {
@@ -578,6 +648,91 @@ body {
   background: rgba(255, 255, 255, 0.06);
   color: var(--xdx-text-secondary);
   transform: rotate(30deg) scale(1.05);
+}
+
+.xdx-footer-btn-dial {
+  color: rgba(201, 225, 255, 0.9);
+  background: linear-gradient(
+    135deg,
+    rgba(74, 112, 255, 0.28) 0%,
+    rgba(59, 186, 255, 0.24) 100%
+  );
+  border: 1px solid rgba(167, 197, 255, 0.28);
+}
+.xdx-footer-btn-dial:hover {
+  transform: scale(1.06);
+  background: linear-gradient(
+    135deg,
+    rgba(88, 124, 255, 0.4) 0%,
+    rgba(69, 195, 255, 0.34) 100%
+  );
+}
+.xdx-footer-btn-dial.active {
+  color: #eef5ff;
+  box-shadow: 0 0 0 1px rgba(171, 210, 255, 0.25), 0 10px 24px rgba(46, 124, 226, 0.25);
+}
+
+.xdx-sidebar-dial-drawer {
+  position: absolute;
+  left: 10px;
+  bottom: calc(100% - 6px);
+  width: min(380px, calc(100% - 20px));
+  border-radius: 18px;
+  border: 1px solid rgba(149, 184, 255, 0.22);
+  background: linear-gradient(
+    180deg,
+    rgba(9, 16, 34, 0.96) 0%,
+    rgba(11, 15, 30, 0.96) 100%
+  );
+  box-shadow: 0 22px 50px rgba(2, 6, 16, 0.5);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  opacity: 0;
+  transform: translateY(12px) scale(0.98);
+  transform-origin: bottom left;
+  pointer-events: none;
+  transition: opacity var(--xdx-transition-slow), transform var(--xdx-transition-slow);
+  max-height: min(68vh, 620px);
+  overflow-y: auto;
+}
+.xdx-sidebar-dial-drawer.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.xdx-sidebar-dial-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.xdx-sidebar-dial-drawer-title {
+  color: rgba(236, 245, 255, 0.86) !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.25px;
+}
+
+.xdx-sidebar-dial-drawer-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: none;
+  color: rgba(255, 255, 255, 0.6);
+  background: rgba(255, 255, 255, 0.04);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--xdx-transition);
+}
+.xdx-sidebar-dial-drawer-close:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
 }
 
 .xdx-core-status {
@@ -1302,6 +1457,56 @@ body {
   box-shadow: 0 6px 30px rgba(255, 71, 87, 0.55) !important;
 }
 
+.xdx-call-controls-toggle {
+  position: absolute;
+  right: 16px;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  z-index: 22;
+  width: 46px;
+  height: 46px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+  background: rgba(7, 9, 19, 0.66);
+  color: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all var(--xdx-transition);
+}
+
+.xdx-call-controls-toggle.expanded {
+  background: rgba(17, 26, 54, 0.78);
+  border-color: rgba(128, 166, 255, 0.4);
+}
+
+.xdx-call-controls-toggle:active {
+  transform: scale(0.92);
+}
+
+.xdx-control-bar-floating {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+  z-index: 21;
+  transition: opacity 0.24s ease, transform 0.24s ease;
+  pointer-events: auto;
+}
+
+.xdx-control-bar-floating.collapsed {
+  opacity: 0;
+  transform: translateY(12px);
+  pointer-events: none;
+}
+
+.xdx-control-bar-floating.expanded {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 /* =========================================================================
    Voicemail UI
    ========================================================================= */
@@ -1738,6 +1943,47 @@ body {
   border-color: rgba(102, 126, 234, 0.4);
 }
 
+.xdx-quicdial-qr-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(147, 182, 255, 0.2);
+  background: linear-gradient(
+    135deg,
+    rgba(89, 128, 255, 0.08) 0%,
+    rgba(78, 202, 255, 0.08) 100%
+  );
+}
+
+.xdx-quicdial-qr-image {
+  width: 170px;
+  height: 170px;
+  border-radius: 16px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  box-shadow: inset 0 0 0 1px rgba(6, 16, 42, 0.08);
+}
+
+.xdx-quicdial-qr-code {
+  color: #d8e5ff !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  letter-spacing: 1.4px;
+  font-variant-numeric: tabular-nums;
+}
+
+.xdx-quicdial-qr-hint {
+  color: rgba(255, 255, 255, 0.5) !important;
+  text-align: center;
+  line-height: 1.5;
+}
+
 /* Avatar grid */
 .xdx-avatar-grid {
   display: flex;
@@ -1949,6 +2195,116 @@ body {
   color: rgba(255, 255, 255, 0.18);
   font-size: 14px;
   letter-spacing: 0;
+}
+
+.xdx-dial-qr-row {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.xdx-dial-qr-toggle {
+  width: 100%;
+  border: 1px solid rgba(124, 167, 255, 0.28);
+  border-radius: 12px;
+  background: rgba(54, 95, 189, 0.16);
+  color: #d8e9ff;
+  padding: 9px 12px;
+  font-family: var(--xdx-font);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--xdx-transition);
+}
+.xdx-dial-qr-toggle:hover {
+  background: rgba(68, 111, 210, 0.24);
+}
+.xdx-dial-qr-toggle.active {
+  box-shadow: 0 0 0 1px rgba(169, 207, 255, 0.3), 0 0 20px rgba(84, 149, 255, 0.16);
+}
+
+.xdx-dial-scan-panel {
+  width: 100%;
+  margin-bottom: 14px;
+  padding: 10px;
+  border-radius: 14px;
+  border: 1px solid rgba(136, 173, 255, 0.2);
+  background: rgba(16, 30, 63, 0.52);
+}
+
+.xdx-dial-scan-mode {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.xdx-dial-scan-mode-btn {
+  border: 1px solid rgba(160, 198, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(221, 235, 255, 0.76);
+  padding: 8px 10px;
+  font-family: var(--xdx-font);
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: all var(--xdx-transition);
+}
+.xdx-dial-scan-mode-btn.active {
+  background: rgba(86, 132, 255, 0.24);
+  color: #f3f8ff;
+  border-color: rgba(182, 213, 255, 0.5);
+}
+
+.xdx-dial-camera-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.xdx-dial-camera-preview {
+  width: 100%;
+  aspect-ratio: 1;
+  border-radius: 12px;
+  border: 1px solid rgba(160, 198, 255, 0.24);
+  background: linear-gradient(140deg, rgba(8, 14, 31, 0.92) 0%, rgba(20, 35, 72, 0.92) 100%);
+  object-fit: cover;
+}
+
+.xdx-dial-scan-hint {
+  color: rgba(214, 233, 255, 0.6) !important;
+  line-height: 1.45;
+}
+
+.xdx-dial-image-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.xdx-dial-scan-image-btn {
+  border: 1px solid rgba(153, 189, 255, 0.25);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #d4e7ff;
+  padding: 8px 12px;
+  font-family: var(--xdx-font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--xdx-transition);
+}
+.xdx-dial-scan-image-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.xdx-dial-scan-error {
+  display: block;
+  margin-top: 8px;
+  color: #ff9cab !important;
+  line-height: 1.45;
 }
 
 .xdx-dial-actions {
@@ -2182,7 +2538,77 @@ body {
 .xdx-voicemail-player {
   width: 100%;
   margin-top: 8px;
-  height: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.xdx-voicemail-group-label {
+  display: block;
+  color: rgba(255, 255, 255, 0.52) !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  margin: 6px 4px 2px;
+}
+
+.xdx-voicemail-row {
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.xdx-voicemail-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.xdx-voicemail-row-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.xdx-voicemail-row-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.xdx-voicemail-row-subtitle {
+  color: rgba(255, 255, 255, 0.45) !important;
+  margin-top: 2px;
+}
+
+.xdx-voicemail-unheard-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #ff4d67;
+  box-shadow: 0 0 8px rgba(255, 77, 103, 0.55);
+  flex-shrink: 0;
+}
+
+.xdx-voicemail-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xdx-voicemail-audio {
+  width: 100%;
+  height: 34px;
 }
 
 .xdx-download-open {
@@ -2423,6 +2849,83 @@ body {
 .xdx-friend-request-modal {
   text-align: center;
   padding: 16px 0;
+}
+
+.xdx-friend-request-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  margin-top: 12px;
+}
+
+.xdx-friend-status-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(114, 178, 255, 0.32);
+  background: rgba(48, 134, 255, 0.2);
+  color: #d4ebff !important;
+  font-size: 11px !important;
+  font-weight: 700 !important;
+}
+
+.xdx-friend-profile-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 6px 0 4px;
+}
+
+.xdx-friend-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.xdx-friend-status-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.xdx-friend-status-pill.friend {
+  color: #d8eeff;
+  background: rgba(48, 134, 255, 0.24);
+  border: 1px solid rgba(115, 184, 255, 0.35);
+}
+
+.xdx-friend-status-pill.peer {
+  color: rgba(255, 255, 255, 0.76);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.xdx-friend-status-pill.blocked {
+  color: #ffd4dd;
+  background: rgba(255, 71, 87, 0.22);
+  border: 1px solid rgba(255, 120, 134, 0.32);
+}
+
+.xdx-friend-danger-btn {
+  color: #ff9aae !important;
+  border: 1px solid rgba(255, 115, 134, 0.3) !important;
+  border-radius: 999px !important;
+}
+
+.xdx-friend-danger-btn:hover {
+  color: #ffdbe2 !important;
+  border-color: rgba(255, 145, 160, 0.45) !important;
+  background: rgba(255, 71, 87, 0.16) !important;
 }
 
 .xdx-chat-time {
@@ -2797,6 +3300,23 @@ body {
     padding: 12px 14px calc(104px + env(safe-area-inset-bottom, 0px));
   }
 
+  .xdx-mobile .xdx-sidebar-footer-main {
+    gap: 10px;
+  }
+
+  .xdx-mobile .xdx-sidebar-dial-drawer {
+    left: 12px;
+    right: 12px;
+    width: auto;
+    bottom: calc(100% - 2px);
+    max-height: min(62vh, 520px);
+  }
+
+  .xdx-mobile .xdx-sidebar-dial-drawer-header {
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
   .xdx-mobile .xdx-chat-panel {
     position: absolute;
     inset: 0;
@@ -2814,6 +3334,49 @@ body {
 
   .xdx-mobile .xdx-chat-input-bar {
     padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-tally-bar {
+    padding: calc(8px + env(safe-area-inset-top, 0px)) 10px 8px;
+    gap: 6px;
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-tally {
+    padding: 3px 8px;
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-control-bar {
+    justify-content: stretch;
+    padding: 0;
+    background: transparent;
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-control-bar-inner {
+    width: 100%;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 16px;
+    background: rgba(8, 11, 22, 0.78);
+    border-color: rgba(255, 255, 255, 0.14);
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-ctrl-btn {
+    width: 54px;
+    height: 54px;
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-ctrl-btn-audio-end {
+    width: 62px;
+    height: 62px;
+  }
+
+  .xdx-mobile .xdx-call-mobile-portrait .xdx-local-video {
+    width: 132px;
+    height: 98px;
+    bottom: auto;
+    top: calc(64px + env(safe-area-inset-top, 0px));
+    right: 12px;
   }
 
   .xdx-mobile .xdx-metrics-overlay {

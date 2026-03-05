@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Socket } from "phoenix";
 import type {
   CallResult,
   DiscoveredPeer,
@@ -45,6 +46,10 @@ export type Kyu2TransferCompleteHandler = (
   payload: Kyu2TransferCompletePayload,
 ) => void;
 
+interface QuicdialResolveResult {
+  ip: string;
+}
+
 class SankakuBridge {
   private static instance: SankakuBridge;
 
@@ -58,6 +63,9 @@ class SankakuBridge {
   private kyu2CompleteListeners: Kyu2TransferCompleteHandler[] = [];
   private unlistenFns: UnlistenFn[] = [];
   private ready = false;
+  private omiaiSocket: any = null;
+  private omiaiChannel: any = null;
+  private omiaiJoinPromise: Promise<void> | null = null;
 
   private constructor() {}
 
@@ -190,6 +198,15 @@ class SankakuBridge {
     this.kyu2InitListeners = [];
     this.kyu2ProgressListeners = [];
     this.kyu2CompleteListeners = [];
+    if (this.omiaiChannel) {
+      this.omiaiChannel.leave();
+    }
+    this.omiaiChannel = null;
+    if (this.omiaiSocket) {
+      this.omiaiSocket.disconnect();
+    }
+    this.omiaiSocket = null;
+    this.omiaiJoinPromise = null;
     this.ready = false;
   }
 
@@ -307,7 +324,29 @@ class SankakuBridge {
     code: string,
     audioOnly: boolean = false,
   ): Promise<CallResult> {
-    return invoke<CallResult>("dial_code", { code, audioOnly });
+    const normalized = code.trim();
+    try {
+      return await this.dialQuicdial(normalized, audioOnly);
+    } catch (err) {
+      console.warn(
+        "[Bridge] dial_quicdial failed; falling back to local dial_code",
+        err,
+      );
+      return invoke<CallResult>("dial_code", { code: normalized, audioOnly });
+    }
+  }
+
+  async dialQuicdial(
+    code: string,
+    audioOnly: boolean = false,
+  ): Promise<CallResult> {
+    const normalized = code.trim();
+    const { ip } = await this.resolveQuicdial(normalized);
+    return invoke<CallResult>("dial_quicdial", {
+      code: normalized,
+      ip,
+      audioOnly,
+    });
   }
 
   async startCall(
@@ -392,11 +431,13 @@ class SankakuBridge {
     filename: string,
     dataB64: string,
     expectedSha256?: string,
+    kind?: "file" | "voicemail",
   ): Promise<DownloadedFileEntry> {
     return invoke<DownloadedFileEntry>("save_received_file", {
       filename,
       dataB64,
       expectedSha256,
+      kind,
     });
   }
 
@@ -406,6 +447,10 @@ class SankakuBridge {
 
   async readReceivedFile(path: string): Promise<ReadReceivedFilePayload> {
     return invoke<ReadReceivedFilePayload>("read_received_file", { path });
+  }
+
+  async deleteReceivedFile(path: string): Promise<void> {
+    return invoke<void>("delete_received_file", { path });
   }
 
   async getDownloadDirectory(): Promise<DownloadDirectoryInfo> {
@@ -438,6 +483,127 @@ class SankakuBridge {
 
   async loadCustomAvatar(): Promise<string | null> {
     return invoke<string | null>("load_custom_avatar");
+  }
+
+  async resolveQuicdial(code: string): Promise<QuicdialResolveResult> {
+    const normalized = code.trim();
+    if (!normalized) {
+      throw new Error("missing_quicdial_code");
+    }
+
+    const channel = await this.ensureOmiaiChannel();
+    return new Promise((resolve, reject) => {
+      channel
+        .push("resolve_quicdial", { code: normalized })
+        .receive("ok", (payload: unknown) => {
+          const maybeMap =
+            typeof payload === "object" && payload !== null
+              ? (payload as Record<string, unknown>)
+              : {};
+          const ip =
+            typeof maybeMap.ip === "string" ? maybeMap.ip.trim() : "";
+          if (!ip) {
+            reject(new Error("resolve_quicdial_empty_ip"));
+            return;
+          }
+          resolve({ ip });
+        })
+        .receive("error", (payload: unknown) => {
+          reject(
+            new Error(
+              this.extractErrorReason(payload, "resolve_quicdial_failed"),
+            ),
+          );
+        })
+        .receive("timeout", () => reject(new Error("resolve_quicdial_timeout")));
+    });
+  }
+
+  private async ensureOmiaiChannel(): Promise<any> {
+    if (this.omiaiChannel) {
+      return this.omiaiChannel;
+    }
+    if (this.omiaiJoinPromise) {
+      await this.omiaiJoinPromise;
+      if (this.omiaiChannel) {
+        return this.omiaiChannel;
+      }
+      throw new Error("omiai_channel_unavailable");
+    }
+
+    this.omiaiJoinPromise = (async () => {
+      const profile = await this.getProfile();
+      const endpoint = this.resolveOmiaiEndpoint();
+      const socket = new Socket(endpoint, {
+        params: {
+          public_key: profile.callingCode,
+          event_contract: "dual",
+        },
+        timeout: 7000,
+      });
+
+      socket.onClose(() => {
+        this.omiaiChannel = null;
+        this.omiaiSocket = null;
+      });
+
+      socket.onError(() => {
+        this.omiaiChannel = null;
+      });
+
+      socket.connect();
+
+      const channel = socket.channel(`peer:${profile.callingCode}`, {});
+
+      await new Promise<void>((resolve, reject) => {
+        channel
+          .join()
+          .receive("ok", () => resolve())
+          .receive("error", (payload: unknown) => {
+            reject(new Error(this.extractErrorReason(payload, "omiai_join_failed")));
+          })
+          .receive("timeout", () => reject(new Error("omiai_join_timeout")));
+      });
+
+      this.omiaiSocket = socket;
+      this.omiaiChannel = channel;
+    })();
+
+    try {
+      await this.omiaiJoinPromise;
+    } finally {
+      this.omiaiJoinPromise = null;
+    }
+
+    if (!this.omiaiChannel) {
+      throw new Error("omiai_channel_unavailable");
+    }
+    return this.omiaiChannel;
+  }
+
+  private resolveOmiaiEndpoint(): string {
+    const fromEnv = (import.meta.env.VITE_OMIAI_WS_URL as string | undefined)?.trim();
+    if (fromEnv) {
+      return fromEnv;
+    }
+    if (typeof window === "undefined") {
+      return "ws://127.0.0.1:4000/ws/sankaku";
+    }
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    const host = window.location.hostname || "127.0.0.1";
+    return `${proto}://${host}:4000/ws/sankaku`;
+  }
+
+  private extractErrorReason(payload: unknown, fallback: string): string {
+    if (typeof payload !== "object" || payload === null) {
+      return fallback;
+    }
+    const maybeMap = payload as Record<string, unknown>;
+    const reasonValue = maybeMap.reason ?? maybeMap["reason"];
+    if (typeof reasonValue === "string" && reasonValue.trim()) {
+      return reasonValue;
+    }
+    return fallback;
   }
 }
 
