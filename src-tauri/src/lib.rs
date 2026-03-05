@@ -125,6 +125,7 @@ struct AppState {
     friends_path: PathBuf,
     conversations_dir: PathBuf,
     received_files_dir: PathBuf,
+    download_dir_config_path: PathBuf,
     instance_id: String,
     #[allow(dead_code)]
     signaling_port: u16,
@@ -189,6 +190,22 @@ fn save_profile(path: &PathBuf, profile: &UserProfile) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(profile).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn load_download_directory(path: &PathBuf) -> Option<PathBuf> {
+    let configured = fs::read_to_string(path).ok()?;
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(trimmed))
+}
+
+fn save_download_directory(path: &PathBuf, directory: &PathBuf) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    fs::write(path, directory.to_string_lossy().as_bytes()).map_err(|e| e.to_string())
 }
 
 fn epoch_secs() -> u64 {
@@ -951,6 +968,29 @@ fn list_received_files(
     Ok(entries)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_download_directory(
+    path: String,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Download directory path cannot be empty".into());
+    }
+
+    let mut directory = PathBuf::from(trimmed);
+    if !directory.is_absolute() {
+        directory = std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(directory);
+    }
+    fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    s.received_files_dir = directory.clone();
+    save_download_directory(&s.download_dir_config_path, &directory)
+}
+
 // ---------------------------------------------------------------------------
 // Custom avatar
 // ---------------------------------------------------------------------------
@@ -992,7 +1032,9 @@ pub fn run() {
             let profile_path = data_dir.join("profile.json");
             let friends_path = data_dir.join("friends.json");
             let conversations_dir = data_dir.join("conversations");
-            let received_files_dir = data_dir.join("received_files");
+            let download_dir_config_path = data_dir.join("download_directory.txt");
+            let received_files_dir = load_download_directory(&download_dir_config_path)
+                .unwrap_or_else(|| data_dir.join("received_files"));
             let profile = load_profile(&profile_path);
             save_profile(&profile_path, &profile).ok();
             fs::create_dir_all(&conversations_dir).ok();
@@ -1020,6 +1062,7 @@ pub fn run() {
                 friends_path,
                 conversations_dir,
                 received_files_dir,
+                download_dir_config_path,
                 instance_id,
                 signaling_port,
                 discovered_peers: HashMap::new(),
@@ -1067,6 +1110,7 @@ pub fn run() {
             list_conversations,
             save_received_file,
             list_received_files,
+            set_download_directory,
             save_custom_avatar,
             load_custom_avatar,
         ])

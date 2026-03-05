@@ -36,6 +36,7 @@ interface Props {
   chatOpen: boolean;
   unreadChat: number;
   voicemailRecording: boolean;
+  voicemailEnabled: boolean;
   onToggleCamera: () => void;
   onToggleMic: () => void;
   onEndCall: () => void;
@@ -79,6 +80,7 @@ const CallView: React.FC<Props> = ({
   chatOpen,
   unreadChat,
   voicemailRecording,
+  voicemailEnabled,
   onToggleCamera,
   onToggleMic,
   onEndCall,
@@ -233,6 +235,7 @@ const CallView: React.FC<Props> = ({
                 <button
                   className="xdx-btn-record"
                   onClick={handleStartRecording}
+                  disabled={!voicemailEnabled}
                 >
                   <span className="xdx-record-circle" />
                 </button>
@@ -240,7 +243,9 @@ const CallView: React.FC<Props> = ({
                   size="small"
                   style={{ color: "rgba(255,255,255,0.5)" }}
                 >
-                  {t("voicemail.startRecording")}
+                  {voicemailEnabled
+                    ? t("voicemail.startRecording")
+                    : t("voicemail.onlyFriends")}
                 </Text>
                 <button className="xdx-link-btn" onClick={onEndCall}>
                   {t("voicemail.back")}

@@ -308,6 +308,10 @@ class SankakuBridge {
     return invoke<DownloadedFileEntry[]>("list_received_files");
   }
 
+  async setDownloadDirectory(path: string): Promise<void> {
+    return invoke<void>("set_download_directory", { path });
+  }
+
   // -----------------------------------------------------------------------
   // Custom Avatar
   // -----------------------------------------------------------------------

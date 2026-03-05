@@ -145,6 +145,8 @@ body {
 .xdx-layout {
   width: 100vw !important;
   height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
   overflow: hidden !important;
   display: flex !important;
   flex-direction: row !important;
@@ -205,8 +207,8 @@ body {
 
 .xdx-content-main {
   flex: 1;
-  min-width: 0;
-  min-height: 0;
+  min-width: 0 !important;
+  min-height: 0 !important;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -355,6 +357,28 @@ body {
 .xdx-tab:hover {
   color: var(--xdx-text-secondary);
   background: var(--xdx-bg-hover);
+}
+.xdx-tab-dial-action {
+  color: rgba(226, 236, 255, 0.95);
+  background: linear-gradient(
+    135deg,
+    rgba(74, 112, 255, 0.35) 0%,
+    rgba(59, 186, 255, 0.3) 100%
+  );
+  border: 1px solid rgba(167, 197, 255, 0.35);
+  box-shadow: 0 10px 26px rgba(32, 94, 185, 0.26);
+}
+.xdx-tab-dial-action:hover {
+  color: #f4f8ff;
+  background: linear-gradient(
+    135deg,
+    rgba(88, 124, 255, 0.44) 0%,
+    rgba(69, 195, 255, 0.4) 100%
+  );
+  box-shadow: 0 12px 30px rgba(48, 109, 210, 0.32);
+}
+.xdx-tab-dial-action:active {
+  transform: scale(0.95);
 }
 .xdx-tab.active {
   color: #cfdaff;
@@ -585,6 +609,7 @@ body {
   align-items: center;
   justify-content: center;
   position: relative;
+  overflow: hidden;
   background:
     radial-gradient(
       circle at 18% 24%,
@@ -599,6 +624,49 @@ body {
     linear-gradient(160deg, #080b18 0%, #0f1326 58%, #090d19 100%);
   background-size: 160% 160%, 160% 160%, 100% 100%;
   animation: xdx-idle-bg-shift 15s ease-in-out infinite;
+}
+
+.xdx-idle-glass {
+  position: absolute;
+  border-radius: 28px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: linear-gradient(
+    140deg,
+    rgba(255, 255, 255, 0.18) 0%,
+    rgba(255, 255, 255, 0.04) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 12px 34px rgba(6, 10, 22, 0.26);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.xdx-idle-glass-1 {
+  top: 8%;
+  left: 10%;
+  width: clamp(120px, 24vw, 220px);
+  height: clamp(120px, 21vw, 190px);
+  animation: xdx-idle-glass-drift-1 19s ease-in-out infinite;
+}
+
+.xdx-idle-glass-2 {
+  bottom: 10%;
+  right: 12%;
+  width: clamp(150px, 28vw, 250px);
+  height: clamp(110px, 20vw, 180px);
+  animation: xdx-idle-glass-drift-2 22s ease-in-out infinite;
+}
+
+.xdx-idle-glass-3 {
+  top: 42%;
+  right: 24%;
+  width: clamp(88px, 14vw, 150px);
+  height: clamp(88px, 14vw, 150px);
+  border-radius: 50%;
+  animation: xdx-idle-glass-drift-3 16s ease-in-out infinite;
 }
 
 /* Ambient orbs for idle state */
@@ -878,47 +946,42 @@ body {
 }
 
 .xdx-tally.live {
-  opacity: 0.9;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  opacity: 0.78;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .xdx-tally-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  opacity: 0.7;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.16),
-    0 0 6px rgba(255, 255, 255, 0.12);
+  opacity: 0.6;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.24);
   transition: all var(--xdx-transition);
 }
 
 .xdx-tally.live .xdx-tally-dot {
   animation: xdx-tally-pulse 1.5s ease-in-out infinite;
-  opacity: 0.84;
+  opacity: 0.7;
 }
 
 .xdx-tally-camera.live {
-  background: rgba(255, 71, 87, 0.06);
+  background: rgba(255, 71, 87, 0.04);
 }
 .xdx-tally-camera.live .xdx-tally-dot {
-  background: rgba(255, 71, 87, 0.82);
-  box-shadow:
-    0 0 0 1px rgba(255, 71, 87, 0.22),
-    0 0 7px rgba(255, 71, 87, 0.2);
+  background: rgba(255, 71, 87, 0.58);
+  box-shadow: 0 0 0 1px rgba(255, 71, 87, 0.32);
 }
 .xdx-tally-camera.off .xdx-tally-dot {
   background: var(--xdx-offline);
 }
 
 .xdx-tally-mic.live {
-  background: rgba(46, 213, 115, 0.06);
+  background: rgba(46, 213, 115, 0.04);
 }
 .xdx-tally-mic.live .xdx-tally-dot {
-  background: rgba(46, 213, 115, 0.82);
-  box-shadow:
-    0 0 0 1px rgba(46, 213, 115, 0.24),
-    0 0 7px rgba(46, 213, 115, 0.2);
+  background: rgba(46, 213, 115, 0.58);
+  box-shadow: 0 0 0 1px rgba(46, 213, 115, 0.32);
 }
 .xdx-tally-mic.off .xdx-tally-dot {
   background: var(--xdx-offline);
@@ -1501,6 +1564,21 @@ body {
   100% {
     background-position: 35% 100%, 62% 0%, 50% 50%;
   }
+}
+
+@keyframes xdx-idle-glass-drift-1 {
+  0%, 100% { transform: translate(0, 0) rotate(-6deg); }
+  50% { transform: translate(16px, 14px) rotate(-2deg); }
+}
+
+@keyframes xdx-idle-glass-drift-2 {
+  0%, 100% { transform: translate(0, 0) rotate(4deg); }
+  50% { transform: translate(-18px, -12px) rotate(9deg); }
+}
+
+@keyframes xdx-idle-glass-drift-3 {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(10px, -12px) scale(1.08); }
 }
 
 @keyframes xdx-orb-float {
@@ -2576,15 +2654,14 @@ body {
     transparent 100%);
 }
 
-.xdx-titlebar [data-tauri-drag-region] {
-  -webkit-app-region: drag;
-}
-
 .xdx-titlebar button,
 .xdx-titlebar input,
 .xdx-titlebar textarea,
 .xdx-titlebar select,
-.xdx-titlebar a {
+.xdx-titlebar a,
+.xdx-titlebar .xdx-titlebar-icon,
+.xdx-titlebar .semi-icon,
+.xdx-titlebar [role="button"] {
   -webkit-app-region: no-drag;
 }
 
@@ -2653,7 +2730,10 @@ body {
 
 @media (max-width: 900px) {
   .xdx-layout {
-    height: 100dvh !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    max-height: 100vh !important;
+    overflow: hidden !important;
   }
 
   .xdx-window-drag-strip {
@@ -2702,17 +2782,36 @@ body {
   .xdx-mobile .xdx-sidebar {
     display: flex;
     flex-direction: column;
-    padding-bottom: calc(86px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
   }
 
   .xdx-mobile .xdx-contact-list {
     flex: 1;
-    padding-bottom: 132px;
+    padding-bottom: calc(140px + env(safe-area-inset-bottom, 0px));
   }
 
   .xdx-mobile .xdx-sidebar-tabs {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    z-index: 120;
     gap: 8px;
     padding: 11px 12px calc(12px + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid rgba(255, 255, 255, 0.11);
+    background: linear-gradient(
+      180deg,
+      rgba(13, 16, 31, 0.94) 0%,
+      rgba(8, 10, 20, 0.985) 100%
+    );
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+  }
+
+  .xdx-mobile .xdx-tab-dial-action {
+    transform: translateY(-2px);
+    box-shadow: 0 10px 24px rgba(48, 109, 210, 0.3);
   }
 
   .xdx-mobile .xdx-tab {
@@ -2725,7 +2824,7 @@ body {
   }
 
   .xdx-mobile .xdx-sidebar-footer {
-    padding: 12px 14px 96px;
+    padding: 12px 14px calc(104px + env(safe-area-inset-bottom, 0px));
   }
 
   .xdx-mobile .xdx-chat-panel {
@@ -2750,6 +2849,29 @@ body {
   .xdx-mobile .xdx-metrics-overlay {
     min-width: 152px;
     padding: 8px 10px;
+  }
+
+  .xdx-incoming-modal .semi-modal-content {
+    width: min(92vw, 430px) !important;
+    max-height: min(88vh, 640px);
+  }
+
+  .xdx-incoming-content {
+    min-height: min(72vh, 540px);
+    padding: 34px 22px 26px;
+  }
+
+  .xdx-incoming-actions {
+    margin-top: auto;
+    padding-top: 22px;
+    width: 100%;
+    justify-content: space-evenly;
+    align-items: flex-end;
+  }
+
+  .xdx-call-action {
+    min-height: 120px;
+    justify-content: flex-end;
   }
 }
 

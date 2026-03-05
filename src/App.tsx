@@ -668,7 +668,14 @@ const AppInner: React.FC = () => {
           rtcRef.current = null;
           media.stopCamera();
           setRemoteStream(null);
-          setCallState(CallState.Voicemail);
+          if (getFriendByCode(connectedPeerRef.current?.code)?.publicKey) {
+            setCallState(CallState.Voicemail);
+          } else {
+            Toast.warning({ content: t("voicemail.onlyFriends") });
+            setCallState(CallState.Idle);
+            setActiveCall(null);
+            setPendingOffer(null);
+          }
           break;
       }
     });
@@ -1440,7 +1447,7 @@ const AppInner: React.FC = () => {
       entry.fileName.startsWith("voicemail_"),
     );
     const sidebarTabs: Array<{
-      key: SidebarTab | "dial";
+      key: SidebarTab;
       icon: React.ReactNode;
       label: string;
     }> = [
@@ -1448,11 +1455,6 @@ const AppInner: React.FC = () => {
         key: "peers",
         icon: <IconUser size="small" />,
         label: t("sidebar.peers"),
-      },
-      {
-        key: "dial",
-        icon: <IconPhone size="small" />,
-        label: t("sidebar.dial"),
       },
       {
         key: "voicemail",
@@ -1473,15 +1475,14 @@ const AppInner: React.FC = () => {
           data-tauri-drag-region=""
           onMouseDown={handleTitlebarMouseDown}
         >
-          <div className="xdx-titlebar-spacer" data-tauri-drag-region="" />
-          <div className="xdx-titlebar-title" data-tauri-drag-region="">
+          <div className="xdx-titlebar-spacer" />
+          <div className="xdx-titlebar-title">
             <img
               src={ownAvatar}
               alt=""
               className="xdx-titlebar-icon"
-              data-tauri-drag-region=""
             />
-            <span data-tauri-drag-region="">{t("app.name")}</span>
+            <span>{t("app.name")}</span>
           </div>
         </div>
 
@@ -1707,23 +1708,27 @@ const AppInner: React.FC = () => {
         </div>
 
         <div className="xdx-sidebar-tabs">
-          {sidebarTabs.map((tab) => (
-            <button
-              key={tab.key}
-              className={`xdx-tab ${
-                tab.key !== "dial" && sidebarTab === tab.key ? "active" : ""
-              }`}
-              onClick={() => {
-                if (tab.key === "dial") {
-                  setDialPadOpen(true);
-                  return;
-                }
-                setSidebarTab(tab.key);
-              }}
-            >
-              {tab.icon}
-              <span>{tab.label}</span>
-            </button>
+          {sidebarTabs.map((tab, index) => (
+            <React.Fragment key={tab.key}>
+              {index === 1 && (
+                <button
+                  type="button"
+                  className="xdx-tab xdx-tab-dial-action"
+                  onClick={() => setDialPadOpen(true)}
+                >
+                  <IconPhone size="small" />
+                  <span>{t("sidebar.dial")}</span>
+                </button>
+              )}
+              <button
+                type="button"
+                className={`xdx-tab ${sidebarTab === tab.key ? "active" : ""}`}
+                onClick={() => setSidebarTab(tab.key)}
+              >
+                {tab.icon}
+                <span>{tab.label}</span>
+              </button>
+            </React.Fragment>
           ))}
         </div>
       </div>
@@ -1737,6 +1742,9 @@ const AppInner: React.FC = () => {
       <div className="xdx-ambient-orb xdx-orb-1" />
       <div className="xdx-ambient-orb xdx-orb-2" />
       <div className="xdx-ambient-orb xdx-orb-3" />
+      <div className="xdx-idle-glass xdx-idle-glass-1" />
+      <div className="xdx-idle-glass xdx-idle-glass-2" />
+      <div className="xdx-idle-glass xdx-idle-glass-3" />
 
       <div className="xdx-idle-hero">
         <EventCard
@@ -1817,6 +1825,9 @@ const AppInner: React.FC = () => {
     callState === CallState.InCallVideo ||
     callState === CallState.InCallAudio ||
     callState === CallState.Voicemail;
+  const voicemailEnabled = Boolean(
+    getFriendByCode(activeCall?.peerId ?? connectedPeer?.code)?.publicKey,
+  );
   const mobileEngaged = isMobile && (chatOpen || callState !== CallState.Idle);
 
   return (
@@ -1850,6 +1861,7 @@ const AppInner: React.FC = () => {
                 chatOpen={chatOpen}
                 unreadChat={unreadChat}
                 voicemailRecording={voicemailRecording}
+                voicemailEnabled={voicemailEnabled}
                 onToggleCamera={media.toggleCamera}
                 onToggleMic={media.toggleMic}
                 onEndCall={handleEndCall}
