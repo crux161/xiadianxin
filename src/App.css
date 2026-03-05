@@ -1563,6 +1563,11 @@ body {
   backdrop-filter: blur(8px) !important;
 }
 
+.semi-toast-wrapper {
+  top: calc(52px + env(safe-area-inset-top, 0px)) !important;
+  z-index: 2400 !important;
+}
+
 .semi-toast-wrapper .semi-toast-content {
   font-family: var(--xdx-font) !important;
   backdrop-filter: blur(12px);
@@ -1681,6 +1686,17 @@ body {
 .xdx-settings-input .semi-input:focus {
   border-color: rgba(102, 126, 234, 0.4) !important;
   box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1) !important;
+}
+
+.xdx-settings-static {
+  padding: 11px 12px;
+  border-radius: var(--xdx-radius-sm);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-all;
 }
 
 .xdx-calling-code-display {
@@ -2161,6 +2177,12 @@ body {
   font-size: 10px;
   margin-top: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.xdx-voicemail-player {
+  width: 100%;
+  margin-top: 8px;
+  height: 32px;
 }
 
 .xdx-download-open {
@@ -2682,6 +2704,10 @@ body {
 
   .xdx-window-drag-strip {
     display: none;
+  }
+
+  .semi-toast-wrapper {
+    top: calc(12px + env(safe-area-inset-top, 0px)) !important;
   }
 
   .xdx-mobile {

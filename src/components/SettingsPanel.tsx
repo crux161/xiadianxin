@@ -2,7 +2,11 @@ import React, { useState, useEffect, useRef } from "react";
 import { Button, Input, Typography, Toast, Radio, RadioGroup, Avatar } from "@douyinfe/semi-ui";
 import { IconClose, IconUpload } from "@douyinfe/semi-icons";
 import { useI18n } from "../i18n/index";
-import type { UserProfile, LocaleCode } from "../types/call";
+import type {
+  DownloadDirectoryInfo,
+  UserProfile,
+  LocaleCode,
+} from "../types/call";
 import SankakuBridge from "../services/SankakuBridge";
 
 import foxImg from "../../reference/images/kyu-kun/fox.jpg";
@@ -36,6 +40,8 @@ interface Props {
   profile: UserProfile | null;
   onClose: () => void;
   onProfileChanged: (p: UserProfile) => void;
+  downloadDirectoryInfo: DownloadDirectoryInfo | null;
+  onDownloadDirectoryChanged: () => void;
   uiScale: number;
   onUiScaleChange: (value: number) => void;
 }
@@ -45,6 +51,8 @@ const SettingsPanel: React.FC<Props> = ({
   profile,
   onClose,
   onProfileChanged,
+  downloadDirectoryInfo,
+  onDownloadDirectoryChanged,
   uiScale,
   onUiScaleChange,
 }) => {
@@ -54,6 +62,8 @@ const SettingsPanel: React.FC<Props> = ({
   const [language, setLanguage] = useState<LocaleCode>("en");
   const [codeCopied, setCodeCopied] = useState(false);
   const [customAvatarUrl, setCustomAvatarUrl] = useState<string | null>(null);
+  const [downloadLocation, setDownloadLocation] = useState("");
+  const [downloadManaged, setDownloadManaged] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -72,8 +82,22 @@ const SettingsPanel: React.FC<Props> = ({
           if (data) setCustomAvatarUrl(data);
         })
         .catch(() => {});
+
+      SankakuBridge.getInstance()
+        .getDownloadDirectory()
+        .then((info) => {
+          setDownloadLocation(info.path);
+          setDownloadManaged(info.mobileManaged);
+        })
+        .catch(() => {});
     }
   }, [open]);
+
+  useEffect(() => {
+    if (!downloadDirectoryInfo) return;
+    setDownloadLocation(downloadDirectoryInfo.path);
+    setDownloadManaged(downloadDirectoryInfo.mobileManaged);
+  }, [downloadDirectoryInfo]);
 
   const handleSave = async () => {
     try {
@@ -82,6 +106,19 @@ const SettingsPanel: React.FC<Props> = ({
         avatarId,
         language,
       });
+      const trimmedDownloadPath = downloadLocation.trim();
+      if (!downloadManaged) {
+        if (!trimmedDownloadPath) {
+          Toast.warning({ content: t("settings.downloadLocationRequired") });
+          return;
+        }
+        if (trimmedDownloadPath !== (downloadDirectoryInfo?.path ?? "")) {
+          await SankakuBridge.getInstance().setDownloadDirectory(
+            trimmedDownloadPath,
+          );
+          onDownloadDirectoryChanged();
+        }
+      }
       onProfileChanged(updated);
       Toast.success({ content: t("toast.profileSaved") });
       onClose();
@@ -231,6 +268,33 @@ const SettingsPanel: React.FC<Props> = ({
                 </Text>
               </div>
             </div>
+          </div>
+
+          <div className="xdx-settings-section">
+            <Text className="xdx-settings-label">{t("settings.downloadLocation")}</Text>
+            {downloadManaged ? (
+              <div className="xdx-settings-static">{downloadLocation}</div>
+            ) : (
+              <Input
+                value={downloadLocation}
+                onChange={(v) => setDownloadLocation(v)}
+                className="xdx-settings-input"
+                size="large"
+                placeholder={t("settings.downloadLocationPlaceholder")}
+              />
+            )}
+            <Text
+              size="small"
+              style={{
+                color: "rgba(255,255,255,0.45)",
+                display: "block",
+                marginTop: 6,
+              }}
+            >
+              {downloadManaged
+                ? t("settings.downloadManagedHint")
+                : t("settings.downloadLocationHint")}
+            </Text>
           </div>
 
           {/* About */}

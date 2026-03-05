@@ -78,6 +78,7 @@ const en = {
     back: "Back",
     empty: "No voicemail yet.",
     play: "Play",
+    hidePlayer: "Hide Player",
     sent: "Voicemail sent",
     received: "Voicemail received",
     sendFailed: "Failed to send voicemail",
@@ -97,6 +98,12 @@ const en = {
     langChinese: "中文",
     uiScale: "UI Scale",
     uiScaleHint: "Increase text and control sizes for easier touch use.",
+    downloadLocation: "Downloads Location",
+    downloadLocationPlaceholder: "/Users/you/Downloads/XiaDianxin",
+    downloadLocationHint: "Incoming files and voicemail are saved to this folder.",
+    downloadManagedHint:
+      "On mobile, downloads are stored in the app Documents folder visible in Files.",
+    downloadLocationRequired: "Downloads location is required on desktop.",
     about: "About",
     version: "Version",
     fontCredit: "Font: HarmonyOS Sans, designed by Huawei.",
@@ -141,6 +148,8 @@ const en = {
     transferring: "Transferring…",
     fileHashMismatch: "File verification failed (SHA-256 mismatch)",
     fileSaveFailed: "Failed to save received file",
+    transferChannelUnavailable:
+      "File transfer channel is not ready yet. Wait for data channel to connect.",
   },
   downloads: {
     title: "Downloads",

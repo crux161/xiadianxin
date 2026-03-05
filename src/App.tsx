@@ -21,11 +21,15 @@ import {
   IconDownload,
   IconUserAdd,
 } from "@douyinfe/semi-icons";
-import { open as shellOpen } from "@tauri-apps/plugin-shell";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { I18nProvider, useI18n } from "./i18n/index";
 import SankakuBridge from "./services/SankakuBridge";
 import { WebRTCService } from "./services/WebRTCService";
+import {
+  decodeKyu2Packet,
+  encodeKyu2ChunkPacket,
+  encodeKyu2CompletePacket,
+} from "./services/Kyu2DataChannel";
 import { useMediaDevices } from "./hooks/useMediaDevices";
 import CallView from "./components/CallView";
 import ChatPanel from "./components/ChatPanel";
@@ -37,6 +41,7 @@ import {
   type ActiveCallInfo,
   type ChatMessage,
   type CallNetworkMetrics,
+  type DownloadDirectoryInfo,
   type DiscoveredPeer,
   type DownloadedFileEntry,
   type FileTransferProgress,
@@ -123,10 +128,136 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(raw);
 }
 
+function isTauriRuntime(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function guessMimeByFileName(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase();
+  switch (ext) {
+    case "m4a":
+      return "audio/mp4";
+    case "webm":
+      return "audio/webm";
+    case "wav":
+      return "audio/wav";
+    case "mp3":
+      return "audio/mpeg";
+    case "aac":
+      return "audio/aac";
+    case "ogg":
+      return "audio/ogg";
+    case "opus":
+      return "audio/opus";
+    default:
+      return "application/octet-stream";
+  }
+}
+
+function triggerBrowserDownload(url: string, fileName: string): void {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.rel = "noopener";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 function generateFriendKey(): string {
-  const rand = new Uint8Array(16);
+  const rand = new Uint8Array(32);
   crypto.getRandomValues(rand);
   return Array.from(rand)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function generateNonceHex(byteLength: number = 12): string {
+  const rand = new Uint8Array(byteLength);
+  crypto.getRandomValues(rand);
+  return Array.from(rand)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.trim().toLowerCase();
+  if (!clean || clean.length % 2 !== 0 || /[^0-9a-f]/.test(clean)) {
+    throw new Error("invalid-hex");
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < clean.length; i += 2) {
+    out[i / 2] = Number.parseInt(clean.slice(i, i + 2), 16);
+  }
+  return out;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const out = new Uint8Array(bytes.byteLength);
+  out.set(bytes);
+  return out.buffer;
+}
+
+async function encryptVoicemailPayload(
+  sharedKeyHex: string,
+  nonceHex: string,
+  plaintext: Uint8Array,
+): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(hexToBytes(sharedKeyHex)),
+    "AES-GCM",
+    false,
+    ["encrypt"],
+  );
+  const iv = hexToBytes(nonceHex);
+  if (iv.byteLength !== 12) {
+    throw new Error("invalid-voicemail-nonce");
+  }
+  const cipher = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    toArrayBuffer(plaintext),
+  );
+  return new Uint8Array(cipher);
+}
+
+async function decryptVoicemailPayload(
+  sharedKeyHex: string,
+  nonceHex: string,
+  ciphertext: Uint8Array,
+): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(hexToBytes(sharedKeyHex)),
+    "AES-GCM",
+    false,
+    ["decrypt"],
+  );
+  const iv = hexToBytes(nonceHex);
+  if (iv.byteLength !== 12) {
+    throw new Error("invalid-voicemail-nonce");
+  }
+  const plain = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: toArrayBuffer(iv) },
+    key,
+    toArrayBuffer(ciphertext),
+  );
+  return new Uint8Array(plain);
+}
+
+async function buildVoicemailTicket(opts: {
+  sharedKey: string;
+  fileId: string;
+  issuedAt: number;
+  nonce: string;
+}): Promise<string> {
+  const encoder = new TextEncoder();
+  const material = encoder.encode(
+    `${opts.sharedKey}:${opts.fileId}:${opts.issuedAt}:${opts.nonce}`,
+  );
+  const digest = await crypto.subtle.digest("SHA-256", material);
+  return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
@@ -184,6 +315,7 @@ const AppInner: React.FC = () => {
     displayName: string;
     avatarId?: string;
     publicKey?: string;
+    voicemailKey?: string;
   } | null>(null);
   const [customAvatarUrl, setCustomAvatarUrl] = useState<string | null>(null);
   const [fileTransfers, setFileTransfers] = useState<
@@ -193,7 +325,17 @@ const AppInner: React.FC = () => {
     new Map(),
   );
   const fileChunksRef = useRef<Map<string, string[]>>(new Map());
+  const kyu2ChunkBuffersRef = useRef<Map<string, Map<number, Uint8Array>>>(
+    new Map(),
+  );
   const [downloads, setDownloads] = useState<DownloadedFileEntry[]>([]);
+  const [downloadDirectoryInfo, setDownloadDirectoryInfo] =
+    useState<DownloadDirectoryInfo | null>(null);
+  const [voicemailUnread, setVoicemailUnread] = useState(0);
+  const [activeVoicemailPath, setActiveVoicemailPath] = useState<string | null>(
+    null,
+  );
+  const voicemailUrlsRef = useRef<Map<string, string>>(new Map());
   const [callMetrics, setCallMetrics] = useState<CallNetworkMetrics | null>(
     null,
   );
@@ -213,6 +355,21 @@ const AppInner: React.FC = () => {
   useEffect(() => {
     connectedPeerRef.current = connectedPeer;
   }, [connectedPeer]);
+
+  useEffect(() => {
+    if (sidebarTab === "voicemail") {
+      setVoicemailUnread(0);
+    }
+  }, [sidebarTab]);
+
+  useEffect(() => {
+    return () => {
+      for (const url of voicemailUrlsRef.current.values()) {
+        URL.revokeObjectURL(url);
+      }
+      voicemailUrlsRef.current.clear();
+    };
+  }, []);
 
   const getAvatarSrc = useCallback(
     (avatarId?: string) => {
@@ -277,6 +434,15 @@ const AppInner: React.FC = () => {
       });
   }, []);
 
+  const refreshDownloadDirectory = useCallback(() => {
+    bridge.current
+      .getDownloadDirectory()
+      .then((info) => setDownloadDirectoryInfo(info))
+      .catch((err) => {
+        console.error("[XDX] get download directory failed", err);
+      });
+  }, []);
+
   // Bootstrap
   useEffect(() => {
     const init = async () => {
@@ -290,6 +456,8 @@ const AppInner: React.FC = () => {
         setFriends(friendsList);
         const received = await bridge.current.listReceivedFiles();
         setDownloads(received);
+        const downloadInfo = await bridge.current.getDownloadDirectory();
+        setDownloadDirectoryInfo(downloadInfo);
 
         const result = await bridge.current.initialize();
         if (result.success) {
@@ -337,11 +505,65 @@ const AppInner: React.FC = () => {
       }
     });
 
+    const unsub6 = bridge.current.onKyu2TransferInit((ev) => {
+      setFileTransfers((prev) => {
+        const next = new Map(prev);
+        if (!next.has(ev.transferId)) {
+          next.set(ev.transferId, {
+            fileId: ev.transferId,
+            fileName: ev.fileName,
+            byteSize: ev.totalBytes,
+            totalSize: 1,
+            received: 0,
+            kind: ev.kind,
+            verified: false,
+            direction: "send",
+            status: "transferring",
+          });
+        }
+        return next;
+      });
+    });
+
+    const unsub7 = bridge.current.onKyu2TransferProgress((ev) => {
+      setFileTransfers((prev) => {
+        const next = new Map(prev);
+        const t = next.get(ev.transferId);
+        if (!t) return next;
+        next.set(ev.transferId, {
+          ...t,
+          totalSize: Math.max(t.totalSize, ev.totalChunks),
+          received: ev.sentChunks,
+          status: "transferring",
+        });
+        return next;
+      });
+    });
+
+    const unsub8 = bridge.current.onKyu2TransferComplete((ev) => {
+      setFileTransfers((prev) => {
+        const next = new Map(prev);
+        const t = next.get(ev.transferId);
+        if (!t) return next;
+        next.set(ev.transferId, {
+          ...t,
+          status: "complete",
+          verified: true,
+          received: t.totalSize,
+          sha256: ev.sha256 ?? t.sha256,
+        });
+        return next;
+      });
+    });
+
     init();
     return () => {
       unsub2();
       unsub3();
       unsub5();
+      unsub6();
+      unsub7();
+      unsub8();
       bridge.current.destroy();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -359,6 +581,188 @@ const AppInner: React.FC = () => {
       bridge.current.saveMessages(peerCode, stored).catch(() => {});
     },
     [],
+  );
+
+  const finalizeIncomingTransfer = useCallback(
+    async (
+      fileId: string,
+      transfer: FileTransferProgress,
+      bytes: Uint8Array,
+      expectedSha256?: string,
+    ) => {
+      const actualHash = await sha256Hex(bytes);
+      if (
+        expectedSha256 &&
+        actualHash.toLowerCase() !== expectedSha256.toLowerCase()
+      ) {
+        setFileTransfers((prev) => {
+          const next = new Map(prev);
+          next.set(fileId, {
+            ...transfer,
+            status: "rejected",
+            verified: false,
+            error: "sha256-mismatch",
+          });
+          return next;
+        });
+        Toast.error({ content: t("chat.fileHashMismatch") });
+        return;
+      }
+
+      let bytesToSave = bytes;
+      if (transfer.kind === "voicemail") {
+        const friend = getFriendByCode(transfer.peerCode);
+        const sharedKey = friend?.voicemailKey;
+        const nonce = transfer.voicemailNonce;
+        if (!sharedKey || !nonce) {
+          setFileTransfers((prev) => {
+            const next = new Map(prev);
+            next.set(fileId, {
+              ...transfer,
+              status: "rejected",
+              verified: false,
+              error: "voicemail-auth-missing",
+            });
+            return next;
+          });
+          Toast.warning({ content: t("voicemail.unauthorized") });
+          return;
+        }
+        try {
+          bytesToSave = await decryptVoicemailPayload(sharedKey, nonce, bytes);
+        } catch {
+          setFileTransfers((prev) => {
+            const next = new Map(prev);
+            next.set(fileId, {
+              ...transfer,
+              status: "rejected",
+              verified: false,
+              error: "voicemail-decrypt-failed",
+            });
+            return next;
+          });
+          Toast.warning({ content: t("voicemail.unauthorized") });
+          return;
+        }
+      }
+
+      let saved: DownloadedFileEntry | null = null;
+      if (isTauriRuntime()) {
+        const fullB64 = bytesToBase64(bytesToSave);
+        const backendExpectedSha =
+          transfer.kind === "voicemail" ? undefined : expectedSha256;
+        saved = await bridge.current.saveReceivedFile(
+          transfer.fileName,
+          fullB64,
+          backendExpectedSha,
+        );
+      } else {
+        const mimeType = guessMimeByFileName(transfer.fileName);
+        const blob = new Blob([toArrayBuffer(bytesToSave)], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const webPath = `web-download://${fileId}`;
+        voicemailUrlsRef.current.set(webPath, url);
+        triggerBrowserDownload(url, transfer.fileName);
+        saved = {
+          fileName: transfer.fileName,
+          path: webPath,
+          sizeBytes: bytesToSave.byteLength,
+          modifiedAt: Math.floor(Date.now() / 1000),
+          sha256: await sha256Hex(bytesToSave),
+        };
+        setDownloads((prev) => [saved!, ...prev]);
+      }
+
+      const receivedLabel =
+        transfer.kind === "voicemail"
+          ? t("voicemail.received")
+          : t("chat.fileReceived");
+      Toast.success({
+        content: `${receivedLabel}: ${saved.fileName}`,
+      });
+      setFileTransfers((prev) => {
+        const next = new Map(prev);
+        next.set(fileId, {
+            ...transfer,
+            fileName: saved.fileName,
+            status: "complete",
+            verified: true,
+            sha256: saved.sha256,
+          });
+        return next;
+      });
+      if (isTauriRuntime()) {
+        refreshDownloads();
+      }
+      if (transfer.kind === "voicemail") {
+        if (sidebarTab !== "voicemail") {
+          setVoicemailUnread((count) => count + 1);
+        }
+      }
+    },
+    [getFriendByCode, refreshDownloads, sidebarTab, t],
+  );
+
+  const handleKyu2BinaryPacket = useCallback(
+    (payload: Uint8Array) => {
+      const packet = decodeKyu2Packet(payload);
+      if (!packet) return;
+
+      if (packet.type === "chunk") {
+        const chunks = kyu2ChunkBuffersRef.current.get(packet.transferId) ?? new Map();
+        chunks.set(packet.chunkIndex, packet.payload.slice());
+        kyu2ChunkBuffersRef.current.set(packet.transferId, chunks);
+        setFileTransfers((prev) => {
+          const next = new Map(prev);
+          const transfer = next.get(packet.transferId);
+          if (!transfer) return next;
+          next.set(packet.transferId, {
+            ...transfer,
+            totalSize: Math.max(transfer.totalSize, packet.totalChunks),
+            received: chunks.size,
+            status: "transferring",
+          });
+          return next;
+        });
+        return;
+      }
+
+      if (packet.type === "complete") {
+        const transfer = fileTransfersRef.current.get(packet.transferId);
+        const chunks = kyu2ChunkBuffersRef.current.get(packet.transferId);
+        if (!transfer || !chunks) return;
+
+        const ordered = Array.from(chunks.entries())
+          .sort((a, b) => a[0] - b[0])
+          .map(([, chunk]) => chunk);
+        const totalLen = ordered.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+        const merged = new Uint8Array(totalLen);
+        let offset = 0;
+        for (const chunk of ordered) {
+          merged.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        const expectedHash = transfer.sha256 ?? packet.sha256;
+        finalizeIncomingTransfer(packet.transferId, transfer, merged, expectedHash).catch(
+          (err) => {
+            console.error("[XDX] kyu2 file finalize failed", err);
+            Toast.error({ content: t("chat.fileSaveFailed") });
+            setFileTransfers((prev) => {
+              const next = new Map(prev);
+              next.set(packet.transferId, {
+                ...transfer,
+                status: "rejected",
+                verified: false,
+                error: "save-failed",
+              });
+              return next;
+            });
+          },
+        );
+        kyu2ChunkBuffersRef.current.delete(packet.transferId);
+      }
+    },
+    [finalizeIncomingTransfer, t],
   );
 
   useEffect(() => {
@@ -413,7 +817,9 @@ const AppInner: React.FC = () => {
           if (existingFriend) {
             if (
               (msg.avatarId && msg.avatarId !== existingFriend.avatarId) ||
-              (msg.publicKey && msg.publicKey !== existingFriend.publicKey)
+              (msg.publicKey && msg.publicKey !== existingFriend.publicKey) ||
+              (msg.voicemailKey &&
+                msg.voicemailKey !== existingFriend.voicemailKey)
             ) {
               bridge.current
                 .addFriend(
@@ -421,6 +827,7 @@ const AppInner: React.FC = () => {
                   msg.displayName,
                   msg.avatarId,
                   msg.publicKey,
+                  msg.voicemailKey,
                 )
                 .then((friend) =>
                   setFriends((prev) => [
@@ -455,6 +862,7 @@ const AppInner: React.FC = () => {
               displayName: msg.displayName,
               avatarId: msg.avatarId,
               publicKey: msg.publicKey,
+              voicemailKey: msg.voicemailKey,
             });
           }
           break;
@@ -470,6 +878,7 @@ const AppInner: React.FC = () => {
               msg.displayName,
               msg.avatarId,
               msg.publicKey,
+              msg.voicemailKey,
             )
             .then(async (f) => {
               setFriends((prev) => [
@@ -484,6 +893,7 @@ const AppInner: React.FC = () => {
                   displayName: prof.displayName,
                   avatarId: prof.avatarId,
                   publicKey: f.publicKey ?? undefined,
+                  voicemailKey: f.voicemailKey ?? undefined,
                 })
                 .catch(() => {});
             })
@@ -499,52 +909,92 @@ const AppInner: React.FC = () => {
           });
           break;
         case "file-offer": {
-          const kind = msg.kind ?? "file";
-          const senderCode = msg.fromCode ?? connectedPeerRef.current?.code;
-          if (kind === "voicemail") {
-            const friend = getFriendByCode(senderCode);
-            const keyOk =
-              !!friend?.publicKey &&
-              !!msg.voicemailAuth &&
-              friend.publicKey === msg.voicemailAuth;
-            if (!keyOk) {
-              bridge.current
-                .sendSignal({ type: "file-reject", fileId: msg.fileId })
-                .catch(() => {});
-              Toast.warning({ content: t("voicemail.unauthorized") });
-              break;
-            }
-          }
+          const processOffer = async () => {
+            const kind = msg.kind ?? "file";
+            const senderCode = msg.fromCode ?? connectedPeerRef.current?.code;
+            if (kind === "voicemail") {
+              const friend = getFriendByCode(senderCode);
+              const sharedKey = friend?.voicemailKey ?? null;
+              const keyOk = !!sharedKey && !!msg.voicemailAuth && sharedKey === msg.voicemailAuth;
+              if (!keyOk) {
+                bridge.current
+                  .sendSignal({ type: "file-reject", fileId: msg.fileId })
+                  .catch(() => {});
+                Toast.warning({ content: t("voicemail.unauthorized") });
+                return;
+              }
 
-          const transfer: FileTransferProgress = {
-            fileId: msg.fileId,
-            fileName: msg.fileName,
-            byteSize: msg.fileSize,
-            totalSize: msg.totalChunks ?? 1,
-            received: 0,
-            kind,
-            sha256: msg.sha256,
-            verified: false,
-            direction: "receive",
-            status: kind === "voicemail" ? "transferring" : "offering",
+              // 0-RTT voicemail ticket validation for established friends.
+              if (
+                msg.voicemailTicket &&
+                msg.voicemailNonce &&
+                msg.voicemailIssuedAt &&
+                sharedKey
+              ) {
+                const ageMs = Math.abs(Date.now() - msg.voicemailIssuedAt);
+                if (ageMs > 60_000) {
+                  bridge.current
+                    .sendSignal({ type: "file-reject", fileId: msg.fileId })
+                    .catch(() => {});
+                  Toast.warning({ content: t("voicemail.unauthorized") });
+                  return;
+                }
+                const expectedTicket = await buildVoicemailTicket({
+                  sharedKey,
+                  fileId: msg.fileId,
+                  issuedAt: msg.voicemailIssuedAt,
+                  nonce: msg.voicemailNonce,
+                });
+                if (expectedTicket !== msg.voicemailTicket) {
+                  bridge.current
+                    .sendSignal({ type: "file-reject", fileId: msg.fileId })
+                    .catch(() => {});
+                  Toast.warning({ content: t("voicemail.unauthorized") });
+                  return;
+                }
+              }
+            }
+
+            const transfer: FileTransferProgress = {
+              fileId: msg.fileId,
+              fileName: msg.fileName,
+              byteSize: msg.fileSize,
+              totalSize: msg.totalChunks ?? 1,
+              received: 0,
+              kind,
+              peerCode: senderCode,
+              voicemailNonce: msg.voicemailNonce,
+              sha256: msg.sha256,
+              verified: false,
+              direction: "receive",
+              status: kind === "voicemail" ? "transferring" : "offering",
+            };
+            setFileTransfers((prev) => new Map(prev).set(msg.fileId, transfer));
+            fileChunksRef.current.delete(msg.fileId);
+            kyu2ChunkBuffersRef.current.delete(msg.fileId);
+            const offerMsg: ChatMessage = {
+              id: `file-offer-${msg.fileId}`,
+              from: "remote",
+              text:
+                kind === "voicemail"
+                  ? `🎙️ ${msg.fileName} (${formatFileSize(msg.fileSize)})`
+                  : `📎 ${msg.fileName} (${formatFileSize(msg.fileSize)})`,
+              fileName: msg.fileName,
+              timestamp: Date.now(),
+            };
+            setChatMessages((prev) => [...prev, offerMsg]);
+            if (kind === "voicemail") {
+              bridge.current
+                .sendSignal({ type: "file-accept", fileId: msg.fileId })
+                .catch(() => {});
+            }
           };
-          setFileTransfers((prev) => new Map(prev).set(msg.fileId, transfer));
-          const offerMsg: ChatMessage = {
-            id: `file-offer-${msg.fileId}`,
-            from: "remote",
-            text:
-              kind === "voicemail"
-                ? `🎙️ ${msg.fileName} (${formatFileSize(msg.fileSize)})`
-                : `📎 ${msg.fileName} (${formatFileSize(msg.fileSize)})`,
-            fileName: msg.fileName,
-            timestamp: Date.now(),
-          };
-          setChatMessages((prev) => [...prev, offerMsg]);
-          if (kind === "voicemail") {
+          processOffer().catch((err) => {
+            console.error("[XDX] file-offer validation failed", err);
             bridge.current
-              .sendSignal({ type: "file-accept", fileId: msg.fileId })
+              .sendSignal({ type: "file-reject", fileId: msg.fileId })
               .catch(() => {});
-          }
+          });
           break;
         }
         case "file-accept": {
@@ -587,58 +1037,12 @@ const AppInner: React.FC = () => {
         }
         case "file-complete": {
           const chunks = fileChunksRef.current.get(msg.fileId) ?? [];
-          const fullB64 = chunks.join("");
           const transfer = fileTransfersRef.current.get(msg.fileId);
           if (transfer) {
             const verifyAndSave = async () => {
-              const bytes = base64ToBytes(fullB64);
-              const actualHash = await sha256Hex(bytes);
+              const bytes = base64ToBytes(chunks.join(""));
               const expectedHash = transfer.sha256 ?? msg.sha256;
-              if (
-                expectedHash &&
-                actualHash.toLowerCase() !== expectedHash.toLowerCase()
-              ) {
-                setFileTransfers((prev) => {
-                  const next = new Map(prev);
-                  next.set(msg.fileId, {
-                    ...transfer,
-                    status: "rejected",
-                    verified: false,
-                    error: "sha256-mismatch",
-                  });
-                  return next;
-                });
-                Toast.error({ content: t("chat.fileHashMismatch") });
-                return;
-              }
-
-              const saved = await bridge.current.saveReceivedFile(
-                transfer.fileName,
-                fullB64,
-                expectedHash,
-              );
-              const receivedLabel =
-                transfer.kind === "voicemail"
-                  ? t("voicemail.received")
-                  : t("chat.fileReceived");
-              Toast.success({
-                content: `${receivedLabel}: ${saved.fileName}`,
-              });
-              setFileTransfers((prev) => {
-                const next = new Map(prev);
-                next.set(msg.fileId, {
-                  ...transfer,
-                  fileName: saved.fileName,
-                  status: "complete",
-                  verified: true,
-                  sha256: saved.sha256,
-                });
-                return next;
-              });
-              refreshDownloads();
-              if (transfer.kind === "voicemail") {
-                setSidebarTab("voicemail");
-              }
+              await finalizeIncomingTransfer(msg.fileId, transfer, bytes, expectedHash);
             };
 
             verifyAndSave().catch((err) => {
@@ -668,7 +1072,7 @@ const AppInner: React.FC = () => {
           rtcRef.current = null;
           media.stopCamera();
           setRemoteStream(null);
-          if (getFriendByCode(connectedPeerRef.current?.code)?.publicKey) {
+          if (getFriendByCode(connectedPeerRef.current?.code)?.voicemailKey) {
             setCallState(CallState.Voicemail);
           } else {
             Toast.warning({ content: t("voicemail.onlyFriends") });
@@ -680,7 +1084,7 @@ const AppInner: React.FC = () => {
       }
     });
     return unsub;
-  }, [getFriendByCode, profile, refreshDownloads, t]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [finalizeIncomingTransfer, getFriendByCode, profile, t]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const cleanupCall = useCallback(() => {
     const recorder = voicemailRecorderRef.current;
@@ -739,6 +1143,7 @@ const AppInner: React.FC = () => {
         rtcRef.current = rtc;
 
         rtc.onRemoteStream = (rs) => setRemoteStream(rs);
+        rtc.onBinaryMessage = handleKyu2BinaryPacket;
         rtc.onIceCandidate = (candidate) => {
           bridge.current
             .sendSignal({ type: "ice", candidate })
@@ -769,7 +1174,7 @@ const AppInner: React.FC = () => {
         cleanupCall();
       }
     },
-    [media, profile, t, cleanupCall, connectedPeer],
+    [handleKyu2BinaryPacket, media, profile, t, cleanupCall, connectedPeer],
   );
 
   const handleAcceptCall = useCallback(
@@ -787,6 +1192,7 @@ const AppInner: React.FC = () => {
         rtcRef.current = rtc;
 
         rtc.onRemoteStream = (rs) => setRemoteStream(rs);
+        rtc.onBinaryMessage = handleKyu2BinaryPacket;
         rtc.onIceCandidate = (candidate) => {
           bridge.current
             .sendSignal({ type: "ice", candidate })
@@ -811,7 +1217,7 @@ const AppInner: React.FC = () => {
         Toast.error({ content: `${t("toast.acceptFailed")}: ${err}` });
       }
     },
-    [pendingOffer, media, t],
+    [pendingOffer, media, t, handleKyu2BinaryPacket],
   );
 
   const handleDeclineCall = useCallback(() => {
@@ -849,7 +1255,7 @@ const AppInner: React.FC = () => {
   const handleRecordVoicemail = useCallback(async (): Promise<boolean> => {
     const peerCode = connectedPeerRef.current?.code;
     const friend = getFriendByCode(peerCode);
-    if (!friend?.publicKey) {
+    if (!friend?.voicemailKey) {
       Toast.warning({ content: t("voicemail.onlyFriends") });
       return false;
     }
@@ -1008,6 +1414,7 @@ const AppInner: React.FC = () => {
             displayName: prof.displayName,
             avatarId: knownFriend ? prof.avatarId : undefined,
             publicKey: knownFriend?.publicKey ?? undefined,
+            voicemailKey: knownFriend?.voicemailKey ?? undefined,
           })
           .catch(() => {});
       } catch (err) {
@@ -1034,13 +1441,14 @@ const AppInner: React.FC = () => {
     const req = pendingFriendRequest;
     setPendingFriendRequest(null);
     try {
-      const friendKey = req.publicKey ?? generateFriendKey();
+      const voicemailKey = req.voicemailKey ?? generateFriendKey();
       const prof = profile ?? (await bridge.current.getProfile());
       const friend = await bridge.current.addFriend(
         req.callingCode,
         req.displayName,
         req.avatarId,
-        friendKey,
+        req.publicKey,
+        voicemailKey,
       );
       setFriends((prev) => [
         ...prev.filter((f) => f.callingCode !== friend.callingCode),
@@ -1052,7 +1460,8 @@ const AppInner: React.FC = () => {
           callingCode: prof.callingCode,
           displayName: prof.displayName,
           avatarId: prof.avatarId,
-          publicKey: friendKey,
+          publicKey: req.publicKey,
+          voicemailKey,
         })
         .catch(() => {});
       setConnectedPeer({ name: req.displayName, code: req.callingCode });
@@ -1077,21 +1486,55 @@ const AppInner: React.FC = () => {
     }): Promise<boolean> => {
       const kind = opts.kind ?? "file";
       const fileId = `f-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const checksum = await sha256Hex(opts.bytes);
-      const b64 = bytesToBase64(opts.bytes);
-
-      const CHUNK_SIZE = 49152;
-      const totalChunks = Math.ceil(b64.length / CHUNK_SIZE);
+      const rtc = rtcRef.current;
+      if (!rtc?.isDataChannelOpen) {
+        Toast.warning({ content: t("chat.transferChannelUnavailable") });
+        return false;
+      }
+      if (kind === "voicemail" && !opts.voicemailAuth) {
+        Toast.warning({ content: t("voicemail.onlyFriends") });
+        return false;
+      }
+      const chunkSize = 16 * 1024;
       const prof = profile ?? (await bridge.current.getProfile());
+
+      let voicemailNonce: string | undefined;
+      let voicemailIssuedAt: number | undefined;
+      let voicemailTicket: string | undefined;
+      let transferBytes = opts.bytes;
+      if (kind === "voicemail" && opts.voicemailAuth) {
+        voicemailNonce = generateNonceHex(12);
+        voicemailIssuedAt = Date.now();
+        voicemailTicket = await buildVoicemailTicket({
+          sharedKey: opts.voicemailAuth,
+          fileId,
+          issuedAt: voicemailIssuedAt,
+          nonce: voicemailNonce,
+        });
+        transferBytes = await encryptVoicemailPayload(
+          opts.voicemailAuth,
+          voicemailNonce,
+          opts.bytes,
+        );
+      }
+      const totalChunks = Math.max(
+        1,
+        Math.ceil(transferBytes.byteLength / chunkSize),
+      );
+      const checksum = await sha256Hex(transferBytes);
 
       await bridge.current.sendSignal({
         type: "file-offer",
         fileId,
         fileName: opts.fileName,
-        fileSize: opts.bytes.byteLength,
+        fileSize: transferBytes.byteLength,
         fromCode: prof.callingCode,
         kind,
         voicemailAuth: opts.voicemailAuth,
+        voicemailNonce,
+        voicemailIssuedAt,
+        voicemailTicket,
+        transport: "kyu2-webrtc-v1",
         totalChunks,
         sha256: checksum,
       });
@@ -1099,7 +1542,7 @@ const AppInner: React.FC = () => {
       const transfer: FileTransferProgress = {
         fileId,
         fileName: opts.fileName,
-        byteSize: opts.bytes.byteLength,
+        byteSize: transferBytes.byteLength,
         totalSize: totalChunks,
         received: 0,
         kind,
@@ -1109,14 +1552,23 @@ const AppInner: React.FC = () => {
         status: "offering",
       };
       setFileTransfers((prev) => new Map(prev).set(fileId, transfer));
+      bridge.current
+        .initKyu2Transfer({
+          transferId: fileId,
+          fileName: opts.fileName,
+          totalBytes: transferBytes.byteLength,
+          kind,
+          peerCode: connectedPeerRef.current?.code,
+        })
+        .catch(() => {});
 
       const sentMsg: ChatMessage = {
         id: `file-send-${fileId}`,
         from: "local",
         text:
           kind === "voicemail"
-            ? `🎙️ ${opts.fileName} (${formatFileSize(opts.bytes.byteLength)})`
-            : `📎 ${opts.fileName} (${formatFileSize(opts.bytes.byteLength)})`,
+            ? `🎙️ ${opts.fileName} (${formatFileSize(transferBytes.byteLength)})`
+            : `📎 ${opts.fileName} (${formatFileSize(transferBytes.byteLength)})`,
         fileName: opts.fileName,
         timestamp: Date.now(),
       };
@@ -1147,28 +1599,75 @@ const AppInner: React.FC = () => {
         return false;
       }
 
-      for (let i = 0; i < totalChunks; i++) {
-        const data = b64.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-        await bridge.current.sendSignal({
-          type: "file-chunk",
-          fileId,
-          offset: i,
-          data,
-          total: totalChunks,
+      try {
+        let sentBytes = 0;
+        for (let i = 0; i < totalChunks; i++) {
+          const start = i * chunkSize;
+          const end = Math.min(start + chunkSize, transferBytes.byteLength);
+          const payload = transferBytes.slice(start, end);
+          const packet = encodeKyu2ChunkPacket({
+            transferId: fileId,
+            chunkIndex: i,
+            totalChunks,
+            payload,
+          });
+          const sent = rtcRef.current?.sendBinary(packet) ?? false;
+          if (!sent) {
+            throw new Error("kyu2-data-channel-closed");
+          }
+          sentBytes += payload.byteLength;
+          setFileTransfers((prev) => {
+            const next = new Map(prev);
+            const t = next.get(fileId);
+            if (t) next.set(fileId, { ...t, received: i + 1 });
+            return next;
+          });
+          bridge.current
+            .updateKyu2TransferProgress({
+              transferId: fileId,
+              sentChunks: i + 1,
+              totalChunks,
+              sentBytes,
+            })
+            .catch(() => {});
+          if ((i + 1) % 32 === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+        const complete = encodeKyu2CompletePacket({
+          transferId: fileId,
+          totalBytes: transferBytes.byteLength,
+          sha256: checksum,
         });
+        const completeSent = rtcRef.current?.sendBinary(complete) ?? false;
+        if (!completeSent) {
+          throw new Error("kyu2-data-channel-closed");
+        }
+        bridge.current
+          .completeKyu2Transfer({
+            transferId: fileId,
+            totalBytes: transferBytes.byteLength,
+            sha256: checksum,
+          })
+          .catch(() => {});
+      } catch (err) {
+        console.error("[XDX] transfer send failed", err);
         setFileTransfers((prev) => {
           const next = new Map(prev);
-          const t = next.get(fileId);
-          if (t) next.set(fileId, { ...t, received: i + 1 });
+          const existing = next.get(fileId);
+          if (existing) {
+            next.set(fileId, {
+              ...existing,
+              status: "rejected",
+              verified: false,
+              error: "send-failed",
+            });
+          }
           return next;
         });
+        return false;
       }
 
-      await bridge.current.sendSignal({
-        type: "file-complete",
-        fileId,
-        sha256: checksum,
-      });
       setFileTransfers((prev) => {
         const next = new Map(prev);
         const existing = next.get(fileId);
@@ -1183,7 +1682,7 @@ const AppInner: React.FC = () => {
       });
       return true;
     },
-    [profile],
+    [profile, t],
   );
 
   const handleSendFile = useCallback(
@@ -1249,7 +1748,7 @@ const AppInner: React.FC = () => {
 
     const peerCode = connectedPeerRef.current?.code;
     const friend = getFriendByCode(peerCode);
-    if (!friend?.publicKey) {
+    if (!friend?.voicemailKey) {
       Toast.warning({ content: t("voicemail.onlyFriends") });
       await handleEndCall();
       return;
@@ -1263,7 +1762,7 @@ const AppInner: React.FC = () => {
       fileName,
       bytes: new Uint8Array(buffer),
       kind: "voicemail",
-      voicemailAuth: friend.publicKey,
+      voicemailAuth: friend.voicemailKey,
     });
     if (sent) {
       Toast.success({ content: t("voicemail.sent") });
@@ -1304,14 +1803,50 @@ const AppInner: React.FC = () => {
     [],
   );
 
-  const handleOpenDownloadedFile = useCallback(async (path: string) => {
-    try {
-      await shellOpen(path);
-    } catch (err) {
-      console.error("[XDX] open downloaded file failed", err);
-      Toast.error({ content: `${err}` });
-    }
-  }, []);
+  const resolveDownloadUrl = useCallback(
+    async (entry: DownloadedFileEntry): Promise<string> => {
+      const cached = voicemailUrlsRef.current.get(entry.path);
+      if (cached) return cached;
+      if (!isTauriRuntime()) {
+        throw new Error("download-url-unavailable");
+      }
+      const payload = await bridge.current.readReceivedFile(entry.path);
+      const bytes = base64ToBytes(payload.dataB64);
+      const blob = new Blob([toArrayBuffer(bytes)], {
+        type: payload.mimeType || guessMimeByFileName(entry.fileName),
+      });
+      const url = URL.createObjectURL(blob);
+      voicemailUrlsRef.current.set(entry.path, url);
+      return url;
+    },
+    [],
+  );
+
+  const handlePlayVoicemail = useCallback(
+    async (entry: DownloadedFileEntry) => {
+      try {
+        await resolveDownloadUrl(entry);
+        setActiveVoicemailPath(entry.path);
+      } catch (err) {
+        console.error("[XDX] load voicemail playback failed", err);
+        Toast.error({ content: `${err}` });
+      }
+    },
+    [resolveDownloadUrl],
+  );
+
+  const handleOpenDownloadedFile = useCallback(
+    async (entry: DownloadedFileEntry) => {
+      try {
+        const url = await resolveDownloadUrl(entry);
+        triggerBrowserDownload(url, entry.fileName);
+      } catch (err) {
+        console.error("[XDX] open downloaded file failed", err);
+        Toast.error({ content: `${err}` });
+      }
+    },
+    [resolveDownloadUrl],
+  );
 
   const handleDialCallStarted = useCallback(
     async (result: import("./types/call").CallResult, audioOnly: boolean) => {
@@ -1333,6 +1868,7 @@ const AppInner: React.FC = () => {
       rtcRef.current = rtc;
 
       rtc.onRemoteStream = (rs) => setRemoteStream(rs);
+      rtc.onBinaryMessage = handleKyu2BinaryPacket;
       rtc.onIceCandidate = (candidate) => {
         bridge.current
           .sendSignal({ type: "ice", candidate })
@@ -1360,7 +1896,7 @@ const AppInner: React.FC = () => {
         audioOnly ? CallState.InCallAudio : CallState.InCallVideo,
       );
     },
-    [media, profile, t],
+    [handleKyu2BinaryPacket, media, profile, t],
   );
 
   useEffect(() => {
@@ -1636,12 +2172,29 @@ const AppInner: React.FC = () => {
                       <div className="xdx-download-hash">
                         SHA-256: {entry.sha256.slice(0, 16)}...
                       </div>
+                      {activeVoicemailPath === entry.path &&
+                        voicemailUrlsRef.current.get(entry.path) && (
+                          <audio
+                            className="xdx-voicemail-player"
+                            controls
+                            preload="metadata"
+                            src={voicemailUrlsRef.current.get(entry.path)}
+                          />
+                        )}
                     </div>
                     <button
                       className="xdx-download-open"
-                      onClick={() => handleOpenDownloadedFile(entry.path)}
+                      onClick={() => {
+                        if (activeVoicemailPath === entry.path) {
+                          setActiveVoicemailPath(null);
+                        } else {
+                          void handlePlayVoicemail(entry);
+                        }
+                      }}
                     >
-                      {t("voicemail.play")}
+                      {activeVoicemailPath === entry.path
+                        ? t("voicemail.hidePlayer")
+                        : t("voicemail.play")}
                     </button>
                   </div>
                 ))
@@ -1676,7 +2229,7 @@ const AppInner: React.FC = () => {
                     </div>
                     <button
                       className="xdx-download-open"
-                      onClick={() => handleOpenDownloadedFile(entry.path)}
+                      onClick={() => void handleOpenDownloadedFile(entry)}
                     >
                       {t("downloads.open")}
                     </button>
@@ -1723,10 +2276,20 @@ const AppInner: React.FC = () => {
               <button
                 type="button"
                 className={`xdx-tab ${sidebarTab === tab.key ? "active" : ""}`}
-                onClick={() => setSidebarTab(tab.key)}
+                onClick={() => {
+                  setSidebarTab(tab.key);
+                  if (tab.key === "voicemail") {
+                    setVoicemailUnread(0);
+                  }
+                }}
               >
                 {tab.icon}
                 <span>{tab.label}</span>
+                {tab.key === "voicemail" && voicemailUnread > 0 && (
+                  <span className="xdx-unread-badge">
+                    {Math.min(voicemailUnread, 99)}
+                  </span>
+                )}
               </button>
             </React.Fragment>
           ))}
@@ -1826,19 +2389,12 @@ const AppInner: React.FC = () => {
     callState === CallState.InCallAudio ||
     callState === CallState.Voicemail;
   const voicemailEnabled = Boolean(
-    getFriendByCode(activeCall?.peerId ?? connectedPeer?.code)?.publicKey,
+    getFriendByCode(activeCall?.peerId ?? connectedPeer?.code)?.voicemailKey,
   );
   const mobileEngaged = isMobile && (chatOpen || callState !== CallState.Idle);
 
   return (
     <>
-      {!isMobile && (
-        <div
-          className="xdx-window-drag-strip"
-          data-tauri-drag-region=""
-          onMouseDown={handleTitlebarMouseDown}
-        />
-      )}
       <Layout
         className={`xdx-layout ${isMobile ? "xdx-mobile" : ""} ${
           mobileEngaged ? "mobile-engaged" : "mobile-sidebar"
@@ -2087,6 +2643,11 @@ const AppInner: React.FC = () => {
         profile={profile}
         onClose={() => setSettingsOpen(false)}
         onProfileChanged={handleProfileChanged}
+        downloadDirectoryInfo={downloadDirectoryInfo}
+        onDownloadDirectoryChanged={() => {
+          refreshDownloadDirectory();
+          refreshDownloads();
+        }}
         uiScale={uiScale}
         onUiScaleChange={setUiScale}
       />

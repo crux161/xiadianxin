@@ -15,6 +15,7 @@ export class WebRTCService {
 
   onRemoteStream: ((stream: MediaStream) => void) | null = null;
   onChatMessage: ((msg: ChatMessage) => void) | null = null;
+  onBinaryMessage: ((payload: Uint8Array) => void) | null = null;
   onIceCandidate: ((candidate: string) => void) | null = null;
   onConnectionStateChange: ((state: RTCPeerConnectionState) => void) | null =
     null;
@@ -59,12 +60,27 @@ export class WebRTCService {
 
   private setupDataChannel(ch: RTCDataChannel) {
     ch.onmessage = (event) => {
-      try {
-        const msg = JSON.parse(event.data) as ChatMessage;
-        msg.from = "remote";
-        this.onChatMessage?.(msg);
-      } catch {
-        /* ignore malformed */
+      if (typeof event.data === "string") {
+        try {
+          const msg = JSON.parse(event.data) as ChatMessage;
+          msg.from = "remote";
+          this.onChatMessage?.(msg);
+        } catch {
+          /* ignore malformed */
+        }
+        return;
+      }
+
+      if (event.data instanceof ArrayBuffer) {
+        this.onBinaryMessage?.(new Uint8Array(event.data));
+        return;
+      }
+
+      if (event.data instanceof Blob) {
+        event.data
+          .arrayBuffer()
+          .then((buf) => this.onBinaryMessage?.(new Uint8Array(buf)))
+          .catch(() => {});
       }
     };
   }
@@ -102,6 +118,20 @@ export class WebRTCService {
     if (this.dataChannel?.readyState === "open") {
       this.dataChannel.send(JSON.stringify(msg));
     }
+  }
+
+  sendBinary(payload: Uint8Array): boolean {
+    if (this.dataChannel?.readyState !== "open") {
+      return false;
+    }
+    const copy = new Uint8Array(payload.byteLength);
+    copy.set(payload);
+    this.dataChannel.send(copy.buffer);
+    return true;
+  }
+
+  get isDataChannelOpen(): boolean {
+    return this.dataChannel?.readyState === "open";
   }
 
   async getMetricsSnapshot(): Promise<WebRTCMetricsSnapshot | null> {
@@ -181,6 +211,7 @@ export class WebRTCService {
     this.dataChannel = null;
     this.onRemoteStream = null;
     this.onChatMessage = null;
+    this.onBinaryMessage = null;
     this.onIceCandidate = null;
     this.onConnectionStateChange = null;
   }

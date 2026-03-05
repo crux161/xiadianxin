@@ -3,9 +3,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   CallResult,
   DiscoveredPeer,
+  DownloadDirectoryInfo,
   DownloadedFileEntry,
   Friend,
   IncomingCallPayload,
+  ReadReceivedFilePayload,
   SignalMessage,
   StoredMessage,
   UserProfile,
@@ -17,6 +19,31 @@ export type PeerDiscoveredHandler = (peer: DiscoveredPeer) => void;
 export type PeerLostHandler = (code: string) => void;
 export type SignalingMessageHandler = (msg: SignalMessage) => void;
 export type SignalingDisconnectHandler = () => void;
+export interface Kyu2TransferInitPayload {
+  transferId: string;
+  fileName: string;
+  totalBytes: number;
+  kind: "file" | "voicemail";
+  peerCode?: string;
+}
+export interface Kyu2TransferProgressPayload {
+  transferId: string;
+  sentChunks: number;
+  totalChunks: number;
+  sentBytes: number;
+}
+export interface Kyu2TransferCompletePayload {
+  transferId: string;
+  totalBytes: number;
+  sha256?: string;
+}
+export type Kyu2TransferInitHandler = (payload: Kyu2TransferInitPayload) => void;
+export type Kyu2TransferProgressHandler = (
+  payload: Kyu2TransferProgressPayload,
+) => void;
+export type Kyu2TransferCompleteHandler = (
+  payload: Kyu2TransferCompletePayload,
+) => void;
 
 class SankakuBridge {
   private static instance: SankakuBridge;
@@ -26,6 +53,9 @@ class SankakuBridge {
   private lostListeners: PeerLostHandler[] = [];
   private signalingListeners: SignalingMessageHandler[] = [];
   private disconnectListeners: SignalingDisconnectHandler[] = [];
+  private kyu2InitListeners: Kyu2TransferInitHandler[] = [];
+  private kyu2ProgressListeners: Kyu2TransferProgressHandler[] = [];
+  private kyu2CompleteListeners: Kyu2TransferCompleteHandler[] = [];
   private unlistenFns: UnlistenFn[] = [];
   private ready = false;
 
@@ -106,7 +136,43 @@ class SankakuBridge {
       }
     });
 
-    this.unlistenFns = [u1, u2, u3, u4, u5];
+    const u6 = await listen<Kyu2TransferInitPayload>("kyu2-transfer-init", (e) => {
+      for (const h of this.kyu2InitListeners) {
+        try {
+          h(e.payload);
+        } catch (err) {
+          console.error("[Bridge] kyu2 init handler error:", err);
+        }
+      }
+    });
+
+    const u7 = await listen<Kyu2TransferProgressPayload>(
+      "kyu2-transfer-progress",
+      (e) => {
+        for (const h of this.kyu2ProgressListeners) {
+          try {
+            h(e.payload);
+          } catch (err) {
+            console.error("[Bridge] kyu2 progress handler error:", err);
+          }
+        }
+      },
+    );
+
+    const u8 = await listen<Kyu2TransferCompletePayload>(
+      "kyu2-transfer-complete",
+      (e) => {
+        for (const h of this.kyu2CompleteListeners) {
+          try {
+            h(e.payload);
+          } catch (err) {
+            console.error("[Bridge] kyu2 complete handler error:", err);
+          }
+        }
+      },
+    );
+
+    this.unlistenFns = [u1, u2, u3, u4, u5, u6, u7, u8];
 
     const result = await invoke<CallResult>("init_sankaku_core");
     this.ready = result.success;
@@ -121,6 +187,9 @@ class SankakuBridge {
     this.lostListeners = [];
     this.signalingListeners = [];
     this.disconnectListeners = [];
+    this.kyu2InitListeners = [];
+    this.kyu2ProgressListeners = [];
+    this.kyu2CompleteListeners = [];
     this.ready = false;
   }
 
@@ -166,6 +235,31 @@ class SankakuBridge {
     this.disconnectListeners.push(handler);
     return () => {
       this.disconnectListeners = this.disconnectListeners.filter(
+        (h) => h !== handler,
+      );
+    };
+  }
+
+  onKyu2TransferInit(handler: Kyu2TransferInitHandler): () => void {
+    this.kyu2InitListeners.push(handler);
+    return () => {
+      this.kyu2InitListeners = this.kyu2InitListeners.filter((h) => h !== handler);
+    };
+  }
+
+  onKyu2TransferProgress(handler: Kyu2TransferProgressHandler): () => void {
+    this.kyu2ProgressListeners.push(handler);
+    return () => {
+      this.kyu2ProgressListeners = this.kyu2ProgressListeners.filter(
+        (h) => h !== handler,
+      );
+    };
+  }
+
+  onKyu2TransferComplete(handler: Kyu2TransferCompleteHandler): () => void {
+    this.kyu2CompleteListeners.push(handler);
+    return () => {
+      this.kyu2CompleteListeners = this.kyu2CompleteListeners.filter(
         (h) => h !== handler,
       );
     };
@@ -252,12 +346,14 @@ class SankakuBridge {
     displayName: string,
     avatarId?: string,
     publicKey?: string,
+    voicemailKey?: string,
   ): Promise<Friend> {
     return invoke<Friend>("add_friend", {
       callingCode,
       displayName,
       avatarId,
       publicKey,
+      voicemailKey,
     });
   }
 
@@ -308,8 +404,28 @@ class SankakuBridge {
     return invoke<DownloadedFileEntry[]>("list_received_files");
   }
 
+  async readReceivedFile(path: string): Promise<ReadReceivedFilePayload> {
+    return invoke<ReadReceivedFilePayload>("read_received_file", { path });
+  }
+
+  async getDownloadDirectory(): Promise<DownloadDirectoryInfo> {
+    return invoke<DownloadDirectoryInfo>("get_download_directory");
+  }
+
   async setDownloadDirectory(path: string): Promise<void> {
     return invoke<void>("set_download_directory", { path });
+  }
+
+  async initKyu2Transfer(payload: Kyu2TransferInitPayload): Promise<void> {
+    return invoke<void>("init_kyu2_transfer", { ...payload });
+  }
+
+  async updateKyu2TransferProgress(payload: Kyu2TransferProgressPayload): Promise<void> {
+    return invoke<void>("update_kyu2_transfer_progress", { ...payload });
+  }
+
+  async completeKyu2Transfer(payload: Kyu2TransferCompletePayload): Promise<void> {
+    return invoke<void>("complete_kyu2_transfer", { ...payload });
   }
 
   // -----------------------------------------------------------------------

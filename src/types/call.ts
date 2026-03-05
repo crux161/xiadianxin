@@ -67,6 +67,7 @@ export interface Friend {
   displayName: string;
   avatarId: string;
   publicKey: string | null;
+  voicemailKey?: string | null;
   approved: boolean;
   addedAt: number;
 }
@@ -87,6 +88,8 @@ export interface FileTransferProgress {
   totalSize: number;
   received: number;
   kind?: "file" | "voicemail";
+  peerCode?: string;
+  voicemailNonce?: string;
   sha256?: string;
   verified?: boolean;
   error?: string;
@@ -100,6 +103,16 @@ export interface DownloadedFileEntry {
   sizeBytes: number;
   modifiedAt: number;
   sha256: string;
+}
+
+export interface DownloadDirectoryInfo {
+  path: string;
+  mobileManaged: boolean;
+}
+
+export interface ReadReceivedFilePayload {
+  dataB64: string;
+  mimeType: string;
 }
 
 export interface CallNetworkMetrics {
@@ -136,6 +149,7 @@ export type SignalMessage =
       displayName: string;
       avatarId?: string;
       publicKey?: string;
+      voicemailKey?: string;
     }
   | {
       type: "friend-request";
@@ -149,6 +163,7 @@ export type SignalMessage =
       displayName: string;
       avatarId?: string;
       publicKey?: string;
+      voicemailKey?: string;
     }
   | {
       type: "file-offer";
@@ -158,6 +173,10 @@ export type SignalMessage =
       fromCode?: string;
       kind?: "file" | "voicemail";
       voicemailAuth?: string;
+      voicemailTicket?: string;
+      voicemailNonce?: string;
+      voicemailIssuedAt?: number;
+      transport?: "legacy-signal-v1" | "kyu2-webrtc-v1";
       totalChunks?: number;
       sha256?: string;
     }

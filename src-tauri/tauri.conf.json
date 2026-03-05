@@ -17,10 +17,10 @@
         "height": 800,
         "minWidth": 960,
         "minHeight": 640,
-        "decorations": false,
+        "decorations": true,
         "transparent": false,
-        "titleBarStyle": "Overlay",
-        "hiddenTitle": true
+        "titleBarStyle": "Visible",
+        "hiddenTitle": false
       }
     ],
     "security": {
@@ -38,7 +38,8 @@
       "icons/icon.ico"
     ],
     "iOS": {
-      "developmentTeam": "VY66CWG9GP"
+      "developmentTeam": "VY66CWG9GP",
+      "infoPlist": "ios/Info.plist"
     }
   }
 }

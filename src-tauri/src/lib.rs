@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -80,7 +80,10 @@ pub struct Friend {
     pub calling_code: String,
     pub display_name: String,
     pub avatar_id: String,
+    #[serde(default)]
     pub public_key: Option<String>,
+    #[serde(default)]
+    pub voicemail_key: Option<String>,
     pub approved: bool,
     pub added_at: u64,
 }
@@ -104,6 +107,47 @@ pub struct ReceivedFileEntry {
     pub size_bytes: u64,
     pub modified_at: u64,
     pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadDirectoryInfo {
+    pub path: String,
+    pub mobile_managed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadReceivedFilePayload {
+    pub data_b64: String,
+    pub mime_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Kyu2TransferInitPayload {
+    pub transfer_id: String,
+    pub file_name: String,
+    pub total_bytes: u64,
+    pub kind: String,
+    pub peer_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Kyu2TransferProgressPayload {
+    pub transfer_id: String,
+    pub sent_chunks: u32,
+    pub total_chunks: u32,
+    pub sent_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Kyu2TransferCompletePayload {
+    pub transfer_id: String,
+    pub total_bytes: u64,
+    pub sha256: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -135,6 +179,7 @@ struct AppState {
     active_peer: Option<String>,
     active_connection: Option<Arc<Mutex<TcpStream>>>,
     session_id: Option<String>,
+    kyu2_active_transfers: HashMap<String, Kyu2TransferInitPayload>,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +251,140 @@ fn save_download_directory(path: &PathBuf, directory: &PathBuf) -> Result<(), St
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     fs::write(path, directory.to_string_lossy().as_bytes()).map_err(|e| e.to_string())
+}
+
+fn mobile_managed_download_dir() -> bool {
+    cfg!(any(target_os = "ios", target_os = "android"))
+}
+
+fn default_download_directory(app: &tauri::App, data_dir: &Path) -> PathBuf {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        if let Ok(document_dir) = app.path().document_dir() {
+            return document_dir.join("XiaDianxin");
+        }
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        if let Ok(download_dir) = app.path().download_dir() {
+            return download_dir.join("XiaDianxin");
+        }
+    }
+    data_dir.join("received_files")
+}
+
+fn resolve_effective_download_directory(
+    app: &tauri::App,
+    data_dir: &Path,
+    config_path: &PathBuf,
+) -> PathBuf {
+    load_download_directory(config_path)
+        .filter(|configured| !configured.as_os_str().is_empty())
+        .unwrap_or_else(|| default_download_directory(app, data_dir))
+}
+
+fn guess_mime_from_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+    {
+        Some(ext) if ext == "m4a" => "audio/mp4",
+        Some(ext) if ext == "webm" => "audio/webm",
+        Some(ext) if ext == "wav" => "audio/wav",
+        Some(ext) if ext == "mp3" => "audio/mpeg",
+        Some(ext) if ext == "aac" => "audio/aac",
+        Some(ext) if ext == "ogg" => "audio/ogg",
+        Some(ext) if ext == "opus" => "audio/opus",
+        _ => "application/octet-stream",
+    }
+}
+
+fn parse_signal_message_type(message: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|v| {
+            v.get("type")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+fn is_voicemail_offer(message: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(message) else {
+        return false;
+    };
+    let Some(msg_type) = value.get("type").and_then(|v| v.as_str()) else {
+        return false;
+    };
+    if msg_type != "file-offer" {
+        return false;
+    }
+    value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(|kind| kind == "voicemail")
+        .unwrap_or(false)
+}
+
+fn voicemail_offer_file_id(message: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|v| {
+            v.get("fileId")
+                .and_then(|file_id| file_id.as_str())
+                .map(|s| s.to_string())
+        })
+}
+
+fn signal_peer_code_from_message(message: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(message)
+        .ok()
+        .and_then(|v| {
+            v.get("fromCode")
+                .and_then(|code| code.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    v.get("callingCode")
+                        .and_then(|code| code.as_str())
+                        .map(|s| s.to_string())
+                })
+        })
+}
+
+fn friend_voicemail_key(friends: &[Friend], calling_code: &str) -> Option<String> {
+    friends
+        .iter()
+        .find(|f| f.calling_code == calling_code && f.approved)
+        .and_then(|f| f.voicemail_key.clone())
+}
+
+fn validate_voicemail_signal_for_peer(
+    message: &str,
+    peer_code: Option<&str>,
+    friends: &[Friend],
+) -> Result<(), String> {
+    if !is_voicemail_offer(message) {
+        return Ok(());
+    }
+
+    let peer_code =
+        peer_code.ok_or_else(|| "No active peer bound for voicemail transfer".to_string())?;
+    let expected_key = friend_voicemail_key(friends, peer_code).ok_or_else(|| {
+        format!(
+            "Voicemail rejected: {} is not an approved friend",
+            peer_code
+        )
+    })?;
+    let value = serde_json::from_str::<serde_json::Value>(message).map_err(|e| e.to_string())?;
+    let auth = value
+        .get("voicemailAuth")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Voicemail offer missing voicemailAuth".to_string())?;
+    if auth != expected_key {
+        return Err("Voicemail key mismatch".into());
+    }
+    Ok(())
 }
 
 fn epoch_secs() -> u64 {
@@ -288,16 +467,60 @@ fn get_conversation_peer_codes(dir: &PathBuf) -> Vec<String> {
 // TCP signaling relay
 // ---------------------------------------------------------------------------
 
-fn spawn_reader_thread(
-    stream: TcpStream,
-    handle: AppHandle,
-    state: Arc<Mutex<AppState>>,
-) {
+fn spawn_reader_thread(stream: TcpStream, handle: AppHandle, state: Arc<Mutex<AppState>>) {
     thread::spawn(move || {
         let reader = BufReader::new(stream);
         for line in reader.lines() {
             match line {
                 Ok(msg) if !msg.is_empty() => {
+                    let sender_code_hint = signal_peer_code_from_message(&msg);
+                    if let Some(code) = sender_code_hint.clone() {
+                        if let Ok(mut s) = state.lock() {
+                            if s.active_peer.is_none() {
+                                s.active_peer = Some(code);
+                            }
+                        }
+                    }
+
+                    let validation_error = {
+                        let s = match state.lock() {
+                            Ok(s) => s,
+                            Err(_) => {
+                                continue;
+                            }
+                        };
+                        let friends = load_friends(&s.friends_path);
+                        let peer_code = sender_code_hint.as_deref().or(s.active_peer.as_deref());
+                        validate_voicemail_signal_for_peer(&msg, peer_code, &friends).err()
+                    };
+
+                    if let Some(err) = validation_error {
+                        let message_type =
+                            parse_signal_message_type(&msg).unwrap_or_else(|| "unknown".into());
+                        eprintln!(
+                            "[XDX] dropped unauthorized {} signal: {}",
+                            message_type, err
+                        );
+                        if let Some(file_id) = voicemail_offer_file_id(&msg) {
+                            if let Ok(payload) = serde_json::to_string(&serde_json::json!({
+                                "type": "file-reject",
+                                "fileId": file_id
+                            })) {
+                                let conn = {
+                                    let s = state.lock().ok();
+                                    s.and_then(|s| s.active_connection.clone())
+                                };
+                                if let Some(conn) = conn {
+                                    if let Ok(mut stream) = conn.lock() {
+                                        let _ = writeln!(stream, "{}", payload);
+                                        let _ = stream.flush();
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
                     let _ = handle.emit("signaling-message", &msg);
                 }
                 Ok(_) => {}
@@ -315,11 +538,7 @@ fn spawn_reader_thread(
     });
 }
 
-fn start_signaling_loop(
-    handle: AppHandle,
-    state: Arc<Mutex<AppState>>,
-    listener: TcpListener,
-) {
+fn start_signaling_loop(handle: AppHandle, state: Arc<Mutex<AppState>>, listener: TcpListener) {
     thread::spawn(move || {
         for stream in listener.incoming() {
             let stream = match stream {
@@ -371,14 +590,7 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
 
         let host = format!("xdx-{}.local.", &instance_id[..8]);
 
-        match ServiceInfo::new(
-            MDNS_SERVICE_TYPE,
-            &instance_id,
-            &host,
-            "",
-            port,
-            &props[..],
-        ) {
+        match ServiceInfo::new(MDNS_SERVICE_TYPE, &instance_id, &host, "", port, &props[..]) {
             Ok(service) => {
                 let service = service.enable_addr_auto();
                 if let Err(e) = daemon.register(service) {
@@ -444,8 +656,7 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
                     if let Ok(mut s) = state.lock() {
                         s.discovered_peers.insert(code.clone(), peer.clone());
                         if !remote_inst.is_empty() {
-                            s.peer_instances
-                                .insert(remote_inst.clone(), code.clone());
+                            s.peer_instances.insert(remote_inst.clone(), code.clone());
                         }
                         s.peer_services
                             .insert(service_fullname.clone(), code.clone());
@@ -455,15 +666,12 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
                 Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                     let removed_code: Option<String> = {
                         if let Ok(s) = state.lock() {
-                            s.peer_services
-                                .get(&fullname)
-                                .cloned()
-                                .or_else(|| {
-                                    s.peer_instances
-                                .iter()
-                                .find(|(inst, _)| fullname.contains(inst.as_str()))
-                                .map(|(_, code)| code.clone())
-                                })
+                            s.peer_services.get(&fullname).cloned().or_else(|| {
+                                s.peer_instances
+                                    .iter()
+                                    .find(|(inst, _)| fullname.contains(inst.as_str()))
+                                    .map(|(_, code)| code.clone())
+                            })
                         } else {
                             None
                         }
@@ -489,9 +697,7 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
 // ---------------------------------------------------------------------------
 
 #[tauri::command(rename_all = "camelCase")]
-fn init_sankaku_core(
-    state: tauri::State<'_, Arc<Mutex<AppState>>>,
-) -> Result<CallResult, String> {
+fn init_sankaku_core(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<CallResult, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.core_state = CoreState::Ready;
     Ok(CallResult {
@@ -502,9 +708,7 @@ fn init_sankaku_core(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn get_profile(
-    state: tauri::State<'_, Arc<Mutex<AppState>>>,
-) -> Result<UserProfile, String> {
+fn get_profile(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<UserProfile, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.profile.clone())
 }
@@ -581,9 +785,7 @@ fn connect_to_peer(
         };
         match TcpStream::connect_timeout(&sock_addr, Duration::from_secs(4)) {
             Ok(stream) => {
-                let writer = Arc::new(Mutex::new(
-                    stream.try_clone().map_err(|e| e.to_string())?,
-                ));
+                let writer = Arc::new(Mutex::new(stream.try_clone().map_err(|e| e.to_string())?));
                 let sid = stub_session_id();
                 {
                     let mut s = state.lock().map_err(|e| e.to_string())?;
@@ -614,7 +816,14 @@ fn send_signal(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<(), String> {
     let conn = {
-        let s = state.lock().map_err(|e| e.to_string())?;
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        if let Some(code) = signal_peer_code_from_message(&message) {
+            if s.active_peer.is_none() {
+                s.active_peer = Some(code);
+            }
+        }
+        let friends = load_friends(&s.friends_path);
+        validate_voicemail_signal_for_peer(&message, s.active_peer.as_deref(), &friends)?;
         s.active_connection.clone()
     };
     if let Some(conn) = conn {
@@ -628,9 +837,7 @@ fn send_signal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn disconnect_signal(
-    state: tauri::State<'_, Arc<Mutex<AppState>>>,
-) -> Result<(), String> {
+fn disconnect_signal(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<(), String> {
     let conn = {
         let mut s = state.lock().map_err(|e| e.to_string())?;
         s.active_connection.take()
@@ -670,9 +877,7 @@ fn start_call(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn accept_call(
-    state: tauri::State<'_, Arc<Mutex<AppState>>>,
-) -> Result<CallResult, String> {
+fn accept_call(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<CallResult, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     let sid = stub_session_id();
     s.core_state = CoreState::InCall;
@@ -685,9 +890,7 @@ fn accept_call(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-fn end_call(
-    state: tauri::State<'_, Arc<Mutex<AppState>>>,
-) -> Result<CallResult, String> {
+fn end_call(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<CallResult, String> {
     let mut s = state.lock().map_err(|e| e.to_string())?;
     let old = s.session_id.take();
     s.core_state = CoreState::Ready;
@@ -731,9 +934,7 @@ fn stop_voicemail(
 // ---------------------------------------------------------------------------
 
 #[tauri::command(rename_all = "camelCase")]
-fn get_friends(
-    state: tauri::State<'_, Arc<Mutex<AppState>>>,
-) -> Result<Vec<Friend>, String> {
+fn get_friends(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<Vec<Friend>, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     Ok(load_friends(&s.friends_path))
 }
@@ -744,6 +945,7 @@ fn add_friend(
     display_name: String,
     avatar_id: Option<String>,
     public_key: Option<String>,
+    voicemail_key: Option<String>,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Friend, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
@@ -759,6 +961,11 @@ fn add_friend(
         if let Some(key) = public_key {
             existing.public_key = Some(key);
         }
+        if let Some(key) = voicemail_key {
+            existing.voicemail_key = Some(key);
+        } else if existing.voicemail_key.is_none() {
+            existing.voicemail_key = existing.public_key.clone();
+        }
         let friend = existing.clone();
         save_friends_to_disk(&s.friends_path, &friends)?;
         return Ok(friend);
@@ -767,6 +974,7 @@ fn add_friend(
         calling_code: calling_code.clone(),
         display_name,
         avatar_id: avatar_id.unwrap_or_else(|| "default".into()),
+        voicemail_key: voicemail_key.clone().or_else(|| public_key.clone()),
         public_key,
         approved: true,
         added_at: epoch_secs(),
@@ -794,7 +1002,9 @@ fn is_friend(
 ) -> Result<bool, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     let friends = load_friends(&s.friends_path);
-    Ok(friends.iter().any(|f| f.calling_code == calling_code && f.approved))
+    Ok(friends
+        .iter()
+        .any(|f| f.calling_code == calling_code && f.approved))
 }
 
 // ---------------------------------------------------------------------------
@@ -969,10 +1179,54 @@ fn list_received_files(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+fn read_received_file(
+    path: String,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<ReadReceivedFilePayload, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    let base =
+        fs::canonicalize(&s.received_files_dir).unwrap_or_else(|_| s.received_files_dir.clone());
+    let requested = PathBuf::from(path);
+    let absolute = if requested.is_absolute() {
+        requested
+    } else {
+        s.received_files_dir.join(requested)
+    };
+    let canonical = fs::canonicalize(&absolute).map_err(|e| e.to_string())?;
+    if !canonical.starts_with(&base) {
+        return Err("Requested file is outside downloads directory".into());
+    }
+    if !canonical.is_file() {
+        return Err("Requested path is not a file".into());
+    }
+
+    let bytes = fs::read(&canonical).map_err(|e| e.to_string())?;
+    Ok(ReadReceivedFilePayload {
+        data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime_type: guess_mime_from_path(&canonical).to_string(),
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_download_directory(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<DownloadDirectoryInfo, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    Ok(DownloadDirectoryInfo {
+        path: s.received_files_dir.to_string_lossy().into_owned(),
+        mobile_managed: mobile_managed_download_dir(),
+    })
+}
+
+#[tauri::command(rename_all = "camelCase")]
 fn set_download_directory(
     path: String,
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<(), String> {
+    if mobile_managed_download_dir() {
+        return Err("Downloads directory is managed by the mobile OS".into());
+    }
+
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("Download directory path cannot be empty".into());
@@ -989,6 +1243,81 @@ fn set_download_directory(
     let mut s = state.lock().map_err(|e| e.to_string())?;
     s.received_files_dir = directory.clone();
     save_download_directory(&s.download_dir_config_path, &directory)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn init_kyu2_transfer(
+    transfer_id: String,
+    file_name: String,
+    total_bytes: u64,
+    kind: String,
+    peer_code: Option<String>,
+    handle: AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    let payload = Kyu2TransferInitPayload {
+        transfer_id: transfer_id.clone(),
+        file_name,
+        total_bytes,
+        kind,
+        peer_code,
+    };
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.kyu2_active_transfers
+            .insert(transfer_id.clone(), payload.clone());
+    }
+    handle
+        .emit("kyu2-transfer-init", &payload)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn update_kyu2_transfer_progress(
+    transfer_id: String,
+    sent_chunks: u32,
+    total_chunks: u32,
+    sent_bytes: u64,
+    handle: AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    {
+        let s = state.lock().map_err(|e| e.to_string())?;
+        if !s.kyu2_active_transfers.contains_key(&transfer_id) {
+            return Err(format!("Unknown kyu2 transfer id: {}", transfer_id));
+        }
+    }
+    let payload = Kyu2TransferProgressPayload {
+        transfer_id,
+        sent_chunks,
+        total_chunks,
+        sent_bytes,
+    };
+    handle
+        .emit("kyu2-transfer-progress", &payload)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn complete_kyu2_transfer(
+    transfer_id: String,
+    total_bytes: u64,
+    sha256: Option<String>,
+    handle: AppHandle,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<(), String> {
+    {
+        let mut s = state.lock().map_err(|e| e.to_string())?;
+        s.kyu2_active_transfers.remove(&transfer_id);
+    }
+    let payload = Kyu2TransferCompletePayload {
+        transfer_id,
+        total_bytes,
+        sha256,
+    };
+    handle
+        .emit("kyu2-transfer-complete", &payload)
+        .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,19 +1355,21 @@ fn load_custom_avatar(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let data_dir = profile_dir(app);
             let profile_path = data_dir.join("profile.json");
             let friends_path = data_dir.join("friends.json");
             let conversations_dir = data_dir.join("conversations");
             let download_dir_config_path = data_dir.join("download_directory.txt");
-            let received_files_dir = load_download_directory(&download_dir_config_path)
-                .unwrap_or_else(|| data_dir.join("received_files"));
+            let received_files_dir =
+                resolve_effective_download_directory(app, &data_dir, &download_dir_config_path);
             let profile = load_profile(&profile_path);
             save_profile(&profile_path, &profile).ok();
             fs::create_dir_all(&conversations_dir).ok();
             fs::create_dir_all(&received_files_dir).ok();
+            if load_download_directory(&download_dir_config_path).is_none() {
+                let _ = save_download_directory(&download_dir_config_path, &received_files_dir);
+            }
 
             let instance_id = generate_instance_id();
 
@@ -1071,18 +1402,11 @@ pub fn run() {
                 active_peer: None,
                 active_connection: None,
                 session_id: None,
+                kyu2_active_transfers: HashMap::new(),
             }));
 
-            start_signaling_loop(
-                app.handle().clone(),
-                Arc::clone(&app_state),
-                listener,
-            );
-            start_mdns(
-                app.handle().clone(),
-                Arc::clone(&app_state),
-                signaling_port,
-            );
+            start_signaling_loop(app.handle().clone(), Arc::clone(&app_state), listener);
+            start_mdns(app.handle().clone(), Arc::clone(&app_state), signaling_port);
 
             app.manage(app_state);
             Ok(())
@@ -1110,7 +1434,12 @@ pub fn run() {
             list_conversations,
             save_received_file,
             list_received_files,
+            read_received_file,
+            get_download_directory,
             set_download_directory,
+            init_kyu2_transfer,
+            update_kyu2_transfer_progress,
+            complete_kyu2_transfer,
             save_custom_avatar,
             load_custom_avatar,
         ])
