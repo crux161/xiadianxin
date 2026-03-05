@@ -259,6 +259,7 @@ const CallView: React.FC<Props> = ({
   }
 
   // ===== In-Call UI =====
+  const isAudioOnlyCall = callState === CallState.InCallAudio;
   const hasRemoteVideo = !!remoteStream;
   const bitrateMbps = ((metrics?.bitrateBps ?? 0) / 1_000_000).toFixed(2);
   const lossPercent = (metrics?.packetLossPercent ?? 0).toFixed(2);
@@ -322,7 +323,7 @@ const CallView: React.FC<Props> = ({
       {/* Video grid */}
       <div className="xdx-video-grid">
         <div className="xdx-remote-video">
-          {callState === CallState.InCallAudio ? (
+          {isAudioOnlyCall ? (
             <div className="xdx-audio-only-display">
               <div className="xdx-audio-center">
                 <Avatar
@@ -402,17 +403,19 @@ const CallView: React.FC<Props> = ({
               </div>
             </div>
           )}
-          <div className="xdx-remote-name-overlay">
-            <Text
-              size="small"
-              style={{
-                color: "#fff",
-                textShadow: "0 1px 4px rgba(0,0,0,0.6)",
-              }}
-            >
-              {activeCall.peerName}
-            </Text>
-          </div>
+          {!isAudioOnlyCall && (
+            <div className="xdx-remote-name-overlay">
+              <Text
+                size="small"
+                style={{
+                  color: "#fff",
+                  textShadow: "0 1px 4px rgba(0,0,0,0.6)",
+                }}
+              >
+                {activeCall.peerName}
+              </Text>
+            </div>
+          )}
         </div>
 
         {/* Local PiP with real webcam feed */}
@@ -445,55 +448,82 @@ const CallView: React.FC<Props> = ({
       </div>
 
       {/* Control bar */}
-      <div className="xdx-control-bar">
-        <div className="xdx-control-bar-inner">
-          <Tooltip
-            content={micOn ? t("call.mute") : t("call.unmute")}
-            position="top"
-          >
-            <button
-              className={`xdx-ctrl-btn ${!micOn ? "toggled-off" : ""}`}
-              onClick={onToggleMic}
+      {isAudioOnlyCall ? (
+        <div className="xdx-control-bar xdx-control-bar-audio">
+          <div className="xdx-control-bar-inner xdx-control-bar-inner-audio">
+            <Tooltip
+              content={micOn ? t("call.mute") : t("call.unmute")}
+              position="top"
             >
-              <IconMicrophone size="extra-large" />
-              {!micOn && <span className="xdx-slash-overlay" />}
-            </button>
-          </Tooltip>
-          <Tooltip
-            content={cameraOn ? t("call.cameraOff") : t("call.cameraOn")}
-            position="top"
-          >
-            <button
-              className={`xdx-ctrl-btn ${!cameraOn ? "toggled-off" : ""}`}
-              onClick={onToggleCamera}
-            >
-              <IconCamera size="extra-large" />
-              {!cameraOn && <span className="xdx-slash-overlay" />}
-            </button>
-          </Tooltip>
-          <Tooltip content={t("chat.title")} position="top">
-            <button
-              className={`xdx-ctrl-btn ${chatOpen ? "active" : ""}`}
-              onClick={onToggleChat}
-            >
-              <IconComment size="extra-large" />
-              {unreadChat > 0 && (
-                <span className="xdx-unread-badge">{unreadChat}</span>
-              )}
-            </button>
-          </Tooltip>
-          <Tooltip content={t("call.shareScreen")} position="top">
-            <button className="xdx-ctrl-btn">
-              <IconDesktop size="extra-large" />
-            </button>
-          </Tooltip>
-          <Tooltip content={t("call.endCall")} position="top">
-            <button className="xdx-ctrl-btn xdx-btn-end" onClick={onEndCall}>
-              <IconClose size="extra-large" />
-            </button>
-          </Tooltip>
+              <button
+                className={`xdx-ctrl-btn xdx-ctrl-btn-audio ${!micOn ? "toggled-off" : ""}`}
+                onClick={onToggleMic}
+              >
+                <IconMicrophone size="extra-large" />
+                {!micOn && <span className="xdx-slash-overlay" />}
+              </button>
+            </Tooltip>
+            <Tooltip content={t("call.endCall")} position="top">
+              <button
+                className="xdx-ctrl-btn xdx-btn-end xdx-ctrl-btn-audio xdx-ctrl-btn-audio-end"
+                onClick={onEndCall}
+              >
+                <IconClose size="extra-large" />
+              </button>
+            </Tooltip>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="xdx-control-bar">
+          <div className="xdx-control-bar-inner">
+            <Tooltip
+              content={micOn ? t("call.mute") : t("call.unmute")}
+              position="top"
+            >
+              <button
+                className={`xdx-ctrl-btn ${!micOn ? "toggled-off" : ""}`}
+                onClick={onToggleMic}
+              >
+                <IconMicrophone size="extra-large" />
+                {!micOn && <span className="xdx-slash-overlay" />}
+              </button>
+            </Tooltip>
+            <Tooltip
+              content={cameraOn ? t("call.cameraOff") : t("call.cameraOn")}
+              position="top"
+            >
+              <button
+                className={`xdx-ctrl-btn ${!cameraOn ? "toggled-off" : ""}`}
+                onClick={onToggleCamera}
+              >
+                <IconCamera size="extra-large" />
+                {!cameraOn && <span className="xdx-slash-overlay" />}
+              </button>
+            </Tooltip>
+            <Tooltip content={t("chat.title")} position="top">
+              <button
+                className={`xdx-ctrl-btn ${chatOpen ? "active" : ""}`}
+                onClick={onToggleChat}
+              >
+                <IconComment size="extra-large" />
+                {unreadChat > 0 && (
+                  <span className="xdx-unread-badge">{unreadChat}</span>
+                )}
+              </button>
+            </Tooltip>
+            <Tooltip content={t("call.shareScreen")} position="top">
+              <button className="xdx-ctrl-btn">
+                <IconDesktop size="extra-large" />
+              </button>
+            </Tooltip>
+            <Tooltip content={t("call.endCall")} position="top">
+              <button className="xdx-ctrl-btn xdx-btn-end" onClick={onEndCall}>
+                <IconClose size="extra-large" />
+              </button>
+            </Tooltip>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

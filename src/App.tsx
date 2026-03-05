@@ -1472,7 +1472,7 @@ const AppInner: React.FC = () => {
       <div className="xdx-sidebar">
         <div
           className="xdx-titlebar"
-          data-tauri-drag-region=""
+          data-tauri-drag-region
           onMouseDown={handleTitlebarMouseDown}
         >
           <div className="xdx-titlebar-spacer" />
