@@ -9,6 +9,7 @@ import type { CallResult } from "../types/call";
 const { Text } = Typography;
 
 interface Props {
+  expanded?: boolean;
   callingCode: string;
   onCallStarted: (result: CallResult, audioOnly: boolean) => void;
 }
@@ -24,7 +25,11 @@ function isValidCode(code: string): boolean {
   return /^\d{3}-\d{3}-\d{3}$/.test(code);
 }
 
-const DialPad: React.FC<Props> = ({ callingCode, onCallStarted }) => {
+const DialPad: React.FC<Props> = ({
+  expanded = false,
+  callingCode,
+  onCallStarted,
+}) => {
   const { t } = useI18n();
   const [input, setInput] = useState("");
   const [codeCopied, setCodeCopied] = useState(false);
@@ -245,7 +250,7 @@ const DialPad: React.FC<Props> = ({ callingCode, onCallStarted }) => {
   );
 
   return (
-    <div className="xdx-dialpad">
+    <div className={`xdx-dialpad ${expanded ? "xdx-dialpad-expanded" : ""}`}>
       {/* Own calling code */}
       <div className="xdx-own-code">
         <Text size="small" style={{ color: "rgba(255,255,255,0.4)" }}>

@@ -64,7 +64,7 @@ npm run dev
 
 1. A native window opens: **虾点心 · XiaDianxin**
 2. The sidebar shows discovered peers from mDNS.
-3. The DialPad now opens from a bottom-left expandable drawer (settings/tally area).
+3. The DialPad is shown by default in the main panel when no chat/call is selected.
 4. The dial input is keypad-only and suppresses iOS native keyboard.
 5. Settings shows your Quicdial QR and DialPad can scan QR via camera or image import.
 6. Outbound dial attempts resolve Quicdial code via Omiai before direct connect handoff.
@@ -106,7 +106,7 @@ XiaDianxin/
 │   ├── services/
 │   │   └── SankakuBridge.ts    # ★ IPC + Omiai bridge (resolve_quicdial + direct dial handoff)
 │   └── components/
-│       ├── DialPad.tsx         # ★ Inline drawer dialer + Quicdial QR scan/import
+│       ├── DialPad.tsx         # ★ Default dialer view + Quicdial QR scan/import
 │       ├── SettingsPanel.tsx   # ★ Profile + Quicdial QR generation
 │       └── CallView.tsx        # ★ Video grid, tally lights, voicemail
 ├── reference/
@@ -150,9 +150,22 @@ The `remoteVideoRef` and `localVideoRef` in `CallView.tsx` are `<video>` element
 
 ## 7. Omiai Endpoint Override
 
-Quicdial resolution defaults to `ws://<current-host>:4000/ws/sankaku`.
-To point to another Omiai host:
+On app startup, the bridge first scans local network mDNS for `_omiai._tcp`
+and auto-connects to the resolved websocket endpoint.
+
+If discovery fails, it falls back to `ws://localhost:4000/ws/sankaku/websocket`.
+If iOS blocks mDNS socket bind with a local-network permission error, discovery
+now degrades safely (no app crash) and continues to override/fallback URL logic.
+
+To force a specific Omiai host:
 
 ```bash
 VITE_OMIAI_WS_URL=ws://127.0.0.1:4000/ws/sankaku npm run dev
 ```
+
+You can also set it inside the app:
+- Open Settings
+- Edit **Custom Signaling Server (Dev)**
+- Save settings
+
+This persists `OMIAI_WS_URL` in localStorage (default: `ws://localhost:4000/ws/sankaku/websocket`) and forces a signaling reconnect.

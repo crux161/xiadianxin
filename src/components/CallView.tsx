@@ -381,7 +381,7 @@ const CallView: React.FC<Props> = ({
             <>
               <video
                 ref={remoteVideoRef}
-                className={`xdx-video-element ${hasRemoteVideo ? "active" : ""}`}
+                className={`xdx-video-element xdx-video-element-cover ${hasRemoteVideo ? "active" : ""}`}
                 autoPlay
                 playsInline
               />

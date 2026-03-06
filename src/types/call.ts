@@ -124,6 +124,59 @@ export interface CallNetworkMetrics {
   fps: number;
 }
 
+export interface VoicemailCheckEntry {
+  id: string;
+  from_quicdial_id: string;
+  metadata: Record<string, unknown>;
+  inserted_at: number;
+}
+
+export interface VoicemailFetchResult {
+  id: string;
+  from_quicdial_id: string;
+  data_b64: string;
+  metadata: Record<string, unknown>;
+  inserted_at: number;
+}
+
+// ---------------------------------------------------------------------------
+// Omiai server types (accounts, friends, presence)
+// ---------------------------------------------------------------------------
+
+export interface OmiaiUser {
+  quicdialId: string;
+  displayName: string;
+  avatarId: string;
+}
+
+export interface OmiaiFriend {
+  friendshipId: string;
+  quicdialId: string;
+  displayName: string;
+  avatarId: string;
+}
+
+export interface OmiaiFriendRequest {
+  friendshipId: string;
+  fromQuicdialId: string;
+  fromDisplayName: string;
+  fromAvatarId: string;
+  createdAt?: string;
+}
+
+export interface PresencePeer {
+  quicdialId: string;
+  displayName: string;
+  avatarId: string;
+  deviceUuid?: string;
+  ip?: string;
+  onlineAt?: number;
+}
+
+// ---------------------------------------------------------------------------
+// Signal messages (P2P)
+// ---------------------------------------------------------------------------
+
 export type SignalMessage =
   | {
       type: "offer";
@@ -131,6 +184,7 @@ export type SignalMessage =
       displayName: string;
       audioOnly: boolean;
       sdp: string;
+      targetCode?: string;
     }
   | { type: "answer"; sdp: string }
   | { type: "ice"; candidate: string }

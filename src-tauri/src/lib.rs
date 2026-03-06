@@ -13,10 +13,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager};
 
 // ---------------------------------------------------------------------------
@@ -24,6 +25,7 @@ use tauri::{AppHandle, Emitter, Manager};
 // ---------------------------------------------------------------------------
 
 const MDNS_SERVICE_TYPE: &str = "_xiadianxin._udp.local.";
+const OMIAI_MDNS_SERVICE_TYPE: &str = "_omiai._tcp.local.";
 
 // ---------------------------------------------------------------------------
 // Shared types (mirrored 1:1 in src/types/call.ts)
@@ -149,6 +151,15 @@ pub struct Kyu2TransferCompletePayload {
     pub transfer_id: String,
     pub total_bytes: u64,
     pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OmiaiDiscoveryResult {
+    pub ws_url: String,
+    pub ip: String,
+    pub port: u16,
+    pub instance_name: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -279,6 +290,9 @@ fn resolve_effective_download_directory(
     data_dir: &Path,
     config_path: &PathBuf,
 ) -> PathBuf {
+    if mobile_managed_download_dir() {
+        return default_download_directory(app, data_dir);
+    }
     load_download_directory(config_path)
         .filter(|configured| !configured.as_os_str().is_empty())
         .unwrap_or_else(|| default_download_directory(app, data_dir))
@@ -594,16 +608,36 @@ fn start_signaling_loop(handle: AppHandle, state: Arc<Mutex<AppState>>, listener
 
 fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
     let (profile, instance_id) = {
-        let s = state.lock().unwrap();
+        let s = match state.lock() {
+            Ok(guard) => guard,
+            Err(err) => {
+                eprintln!("[mDNS] state lock poisoned during startup: {err}");
+                return;
+            }
+        };
         (s.profile.clone(), s.instance_id.clone())
     };
     let local_calling_code = profile.calling_code.clone();
 
     thread::spawn(move || {
-        let daemon = match ServiceDaemon::new() {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("[mDNS] failed to start daemon: {e}");
+        let daemon = match panic::catch_unwind(ServiceDaemon::new) {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                if is_permission_denied_mdns_error(&msg) {
+                    eprintln!(
+                        "[mDNS] daemon start denied (likely iOS/local-network sandbox): {msg}"
+                    );
+                } else {
+                    eprintln!("[mDNS] failed to start daemon: {msg}");
+                }
+                return;
+            }
+            Err(panic_payload) => {
+                eprintln!(
+                    "[mDNS] daemon panicked during startup: {}",
+                    panic_payload_to_string(panic_payload)
+                );
                 return;
             }
         };
@@ -628,10 +662,22 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
             }
         }
 
-        let receiver = match daemon.browse(MDNS_SERVICE_TYPE) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("[mDNS] browse failed: {e}");
+        let receiver = match panic::catch_unwind(AssertUnwindSafe(|| daemon.browse(MDNS_SERVICE_TYPE))) {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                if is_permission_denied_mdns_error(&msg) {
+                    eprintln!("[mDNS] browse denied (likely iOS/local-network sandbox): {msg}");
+                } else {
+                    eprintln!("[mDNS] browse failed: {msg}");
+                }
+                return;
+            }
+            Err(panic_payload) => {
+                eprintln!(
+                    "[mDNS] browse panicked: {}",
+                    panic_payload_to_string(panic_payload)
+                );
                 return;
             }
         };
@@ -718,6 +764,54 @@ fn start_mdns(handle: AppHandle, state: Arc<Mutex<AppState>>, port: u16) {
     });
 }
 
+fn select_preferred_ip_from_service(info: &ServiceInfo) -> Option<IpAddr> {
+    let addresses: Vec<IpAddr> = info
+        .get_addresses()
+        .iter()
+        .filter_map(|addr| addr.to_string().parse::<IpAddr>().ok())
+        .collect();
+
+    addresses
+        .iter()
+        .copied()
+        .find(|ip| ip.is_ipv4() && !ip.is_loopback() && !ip.is_unspecified())
+        .or_else(|| {
+            addresses
+                .iter()
+                .copied()
+                .find(|ip| !ip.is_loopback() && !ip.is_unspecified())
+        })
+}
+
+fn omiai_ws_url(ip: IpAddr, port: u16) -> String {
+    match ip {
+        IpAddr::V4(ipv4) => format!("ws://{}:{}/ws/sankaku/websocket", ipv4, port),
+        IpAddr::V6(ipv6) => format!("ws://[{}]:{}/ws/sankaku/websocket", ipv6, port),
+    }
+}
+
+fn is_permission_denied_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("operation not permitted")
+        || lower.contains("permission denied")
+        || lower.contains("os error 1")
+        || lower.contains("eperm")
+}
+
+fn is_permission_denied_mdns_error(message: &str) -> bool {
+    is_permission_denied_error(message)
+}
+
+fn panic_payload_to_string(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(value) = payload.downcast_ref::<&str>() {
+        return (*value).to_string();
+    }
+    if let Some(value) = payload.downcast_ref::<String>() {
+        return value.clone();
+    }
+    "unknown panic payload".to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Tauri commands
 // ---------------------------------------------------------------------------
@@ -766,6 +860,83 @@ fn get_discovered_peers(
 ) -> Result<Vec<DiscoveredPeer>, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
     Ok(s.discovered_peers.values().cloned().collect())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn discover_omiai_service(timeout_ms: Option<u64>) -> Result<Option<OmiaiDiscoveryResult>, String> {
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(2_800).clamp(500, 15_000));
+    let daemon = match panic::catch_unwind(ServiceDaemon::new) {
+        Ok(Ok(daemon)) => daemon,
+        Ok(Err(e)) => {
+            let msg = e.to_string();
+            if is_permission_denied_mdns_error(&msg) {
+                eprintln!("[mDNS] omiai discovery unavailable due to permission block: {msg}");
+                return Ok(None);
+            }
+            return Err(format!("omiai_mdns_start_failed: {msg}"));
+        }
+        Err(panic_payload) => {
+            let panic_text = panic_payload_to_string(panic_payload);
+            eprintln!("[mDNS] omiai discovery daemon panicked: {panic_text}");
+            return Ok(None);
+        }
+    };
+    let receiver = match panic::catch_unwind(AssertUnwindSafe(|| daemon.browse(OMIAI_MDNS_SERVICE_TYPE))) {
+        Ok(Ok(receiver)) => receiver,
+        Ok(Err(e)) => {
+            let msg = e.to_string();
+            if is_permission_denied_mdns_error(&msg) {
+                eprintln!("[mDNS] omiai discovery browse denied (likely iOS sandbox): {msg}");
+                return Ok(None);
+            }
+            return Err(format!("omiai_mdns_browse_failed: {msg}"));
+        }
+        Err(panic_payload) => {
+            let panic_text = panic_payload_to_string(panic_payload);
+            eprintln!("[mDNS] omiai discovery browse panicked: {panic_text}");
+            return Ok(None);
+        }
+    };
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            eprintln!("[mDNS] omiai discovery timeout after {}ms", timeout.as_millis());
+            return Ok(None);
+        }
+        let remaining = deadline.saturating_duration_since(now);
+
+        match receiver.recv_timeout(remaining) {
+            Ok(ServiceEvent::ServiceResolved(info)) => {
+                let ip = match select_preferred_ip_from_service(&info) {
+                    Some(value) => value,
+                    None => continue,
+                };
+                let port = info.get_port();
+                let ip_text = ip.to_string();
+                let ws_url = omiai_ws_url(ip, port);
+                let instance_name = info.get_fullname().to_string();
+
+                eprintln!(
+                    "[mDNS] omiai discovered instance={} ip={} port={}",
+                    instance_name, ip_text, port
+                );
+
+                return Ok(Some(OmiaiDiscoveryResult {
+                    ws_url,
+                    ip: ip_text,
+                    port,
+                    instance_name,
+                }));
+            }
+            Ok(_) => {}
+            Err(err) => {
+                eprintln!("[mDNS] omiai discovery channel closed: {err}");
+                return Ok(None);
+            }
+        }
+    }
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1188,7 +1359,18 @@ fn list_received_files(
     state: tauri::State<'_, Arc<Mutex<AppState>>>,
 ) -> Result<Vec<ReceivedFileEntry>, String> {
     let s = state.lock().map_err(|e| e.to_string())?;
-    fs::create_dir_all(&s.received_files_dir).map_err(|e| e.to_string())?;
+    if let Err(err) = fs::create_dir_all(&s.received_files_dir) {
+        let msg = err.to_string();
+        if is_permission_denied_error(&msg) {
+            eprintln!(
+                "[downloads] denied creating '{}': {}",
+                s.received_files_dir.display(),
+                msg
+            );
+            return Ok(Vec::new());
+        }
+        return Err(msg);
+    }
 
     let mut entries = Vec::new();
     let voicemail_dir = s.received_files_dir.join("voicemails");
@@ -1507,6 +1689,7 @@ pub fn run() {
             get_profile,
             update_profile,
             get_discovered_peers,
+            discover_omiai_service,
             connect_to_peer,
             send_signal,
             disconnect_signal,

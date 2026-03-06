@@ -193,7 +193,7 @@ const ChatPanel: React.FC<Props> = ({
                   </div>
                 </div>
               ) : (
-                <div className="xdx-chat-bubble">
+                <div className="xdx-chat-bubble xdx-chat-bubble-pill">
                   <Text size="small" style={{ color: "#fff" }}>
                     {msg.text}
                   </Text>

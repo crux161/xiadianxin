@@ -5,9 +5,17 @@
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_xiadianxin._udp</string>
+		<string>_omiai._tcp</string>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>下点心 uses the local network to discover nearby peers for video calling.</string>
+	<string>下点心 uses local networking to discover nearby peers and find the Omiai signaling server on your LAN.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>下点心 needs camera access for video calls.</string>
 	<key>NSMicrophoneUsageDescription</key>

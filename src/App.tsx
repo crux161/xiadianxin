@@ -17,12 +17,12 @@ import {
   IconComment,
   IconClose,
   IconMicrophone,
-  IconPhone,
   IconDownload,
+  IconPhone,
 } from "@douyinfe/semi-icons";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { I18nProvider, useI18n } from "./i18n/index";
-import SankakuBridge from "./services/SankakuBridge";
+import SankakuBridge, { OMIAI_AUTH_TOKEN_KEY } from "./services/SankakuBridge";
 import { WebRTCService } from "./services/WebRTCService";
 import {
   decodeKyu2Packet,
@@ -32,6 +32,7 @@ import {
 import { useMediaDevices } from "./hooks/useMediaDevices";
 import CallView from "./components/CallView";
 import ChatPanel from "./components/ChatPanel";
+import LoginScreen from "./components/LoginScreen";
 import SettingsPanel, { AVATAR_MAP } from "./components/SettingsPanel";
 import DialPad from "./components/DialPad";
 import EventCard from "./components/EventCard";
@@ -50,6 +51,8 @@ import {
   type DownloadedFileEntry,
   type FileTransferProgress,
   type Friend,
+  type OmiaiUser,
+  type PresencePeer,
   type SignalMessage,
   type StoredMessage,
   type UserProfile,
@@ -72,7 +75,7 @@ import "./App.css";
 const { Sider, Content } = Layout;
 const { Title, Text } = Typography;
 
-type SidebarTab = "peers" | "voicemail" | "downloads";
+type SidebarTab = "peers" | "dial" | "voicemail" | "downloads";
 
 const IDLE_ART = [
   { src: foxOk, alt: "Kyu-kun" },
@@ -287,7 +290,7 @@ const AppInner: React.FC = () => {
   const [peers, setPeers] = useState<DiscoveredPeer[]>([]);
   const [coreReady, setCoreReady] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("peers");
-  const [dialPadOpen, setDialPadOpen] = useState(false);
+  const [dialDrawerOpen, setDialDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [isMobile, setIsMobile] = useState<boolean>(
@@ -352,6 +355,12 @@ const AppInner: React.FC = () => {
   const [heardVoicemailPaths, setHeardVoicemailPaths] = useState<Set<string>>(
     new Set(),
   );
+
+  // Omiai auth & presence state
+  const [omiaiUser, setOmiaiUser] = useState<OmiaiUser | null>(null);
+  const [omiaiLoggedIn, setOmiaiLoggedIn] = useState(false);
+  const [omiaiPresencePeers, setOmiaiPresencePeers] = useState<PresencePeer[]>([]);
+  const [checkingAuth, setCheckingAuth] = useState(true);
 
   useEffect(() => {
     fileTransfersRef.current = fileTransfers;
@@ -491,28 +500,134 @@ const AppInner: React.FC = () => {
       });
   }, []);
 
+  // Check for stored Omiai auth token on mount
+  useEffect(() => {
+    const storedToken = window.localStorage.getItem(OMIAI_AUTH_TOKEN_KEY);
+    if (storedToken) {
+      bridge.current.authToken = storedToken;
+      bridge.current
+        .fetchMe()
+        .then((user) => {
+          if (user) {
+            setOmiaiUser(user);
+            setOmiaiLoggedIn(true);
+          } else {
+            // Token expired / invalid
+            window.localStorage.removeItem(OMIAI_AUTH_TOKEN_KEY);
+            bridge.current.authToken = null;
+          }
+        })
+        .catch(() => {
+          window.localStorage.removeItem(OMIAI_AUTH_TOKEN_KEY);
+          bridge.current.authToken = null;
+        })
+        .finally(() => setCheckingAuth(false));
+    } else {
+      setCheckingAuth(false);
+    }
+  }, []);
+
+  // Subscribe to Omiai presence updates
+  useEffect(() => {
+    const unsub = bridge.current.onPresenceUpdate((peers) => {
+      setOmiaiPresencePeers(peers);
+    });
+    return unsub;
+  }, []);
+
+  const handleAuthenticated = useCallback((user: OmiaiUser, token: string) => {
+    setOmiaiUser(user);
+    setOmiaiLoggedIn(true);
+    bridge.current.authToken = token;
+  }, []);
+
+  const handleLogout = useCallback(() => {
+    bridge.current.logout();
+    setOmiaiUser(null);
+    setOmiaiLoggedIn(false);
+    setOmiaiPresencePeers([]);
+  }, []);
+
   // Bootstrap
   useEffect(() => {
     const init = async () => {
       try {
         const prof = await bridge.current.getProfile();
         setProfile(prof);
+      } catch (err) {
+        console.error("[XDX] get profile failed", err);
+      }
+
+      try {
         const customAvatar = await bridge.current.loadCustomAvatar();
         setCustomAvatarUrl(customAvatar);
+      } catch (err) {
+        console.error("[XDX] load custom avatar failed", err);
+      }
 
+      try {
         const friendsList = await bridge.current.getFriends();
         setFriends(friendsList);
+      } catch (err) {
+        console.error("[XDX] get friends failed", err);
+      }
+
+      try {
         const received = await bridge.current.listReceivedFiles();
         setDownloads(received);
+      } catch (err) {
+        console.warn("[XDX] list received files failed; continuing startup", err);
+        setDownloads([]);
+      }
+
+      try {
         const downloadInfo = await bridge.current.getDownloadDirectory();
         setDownloadDirectoryInfo(downloadInfo);
+      } catch (err) {
+        console.warn("[XDX] get download directory failed; continuing startup", err);
+      }
 
+      try {
         const result = await bridge.current.initialize();
         if (result.success) {
           setCoreReady(true);
           Toast.success({ content: t("toast.engineReady"), duration: 2 });
-          const discovered = await bridge.current.getDiscoveredPeers();
-          setPeers(discovered);
+          try {
+            const discovered = await bridge.current.getDiscoveredPeers();
+            setPeers(discovered);
+          } catch (err) {
+            console.warn(
+              "[XDX] initial discovered-peer fetch failed; waiting for live events",
+              err,
+            );
+          }
+
+          // Check for pending voicemails deposited while offline
+          try {
+            const pending = await bridge.current.checkVoicemails();
+            for (const vm of pending) {
+              try {
+                const fetched = await bridge.current.fetchVoicemail(vm.id);
+                const ts = new Date(fetched.inserted_at).toISOString().replace(/[:.]/g, "-");
+                const fileName = `voicemail_${fetched.from_quicdial_id}_${ts}.webm`;
+                await bridge.current.saveReceivedFile(fileName, fetched.data_b64, undefined, "voicemail");
+              } catch (fetchErr) {
+                console.warn("[XDX] voicemail fetch failed for id=", vm.id, fetchErr);
+              }
+            }
+            if (pending.length > 0) {
+              const refreshed = await bridge.current.listReceivedFiles();
+              setDownloads(refreshed);
+              Toast.info({ content: `${t("voicemail.received")} (${pending.length})`, duration: 3 });
+            }
+          } catch (vmErr) {
+            console.warn("[XDX] voicemail check skipped", vmErr);
+          }
+        } else {
+          Toast.error({
+            content: `${t("toast.initFailed")}: ${result.message}`,
+            duration: 4,
+          });
         }
       } catch (err) {
         console.error("[XDX] init error", err);
@@ -604,6 +719,47 @@ const AppInner: React.FC = () => {
       });
     });
 
+    const unsub9 = bridge.current.onVoicemailAvailable(async (entry) => {
+      try {
+        const fetched = await bridge.current.fetchVoicemail(entry.id);
+        const ts = new Date(fetched.inserted_at).toISOString().replace(/[:.]/g, "-");
+        const fileName = `voicemail_${fetched.from_quicdial_id}_${ts}.webm`;
+        await bridge.current.saveReceivedFile(fileName, fetched.data_b64, undefined, "voicemail");
+        const refreshed = await bridge.current.listReceivedFiles();
+        setDownloads(refreshed);
+        Toast.info({ content: `New voicemail from ${entry.from_quicdial_id}`, duration: 3 });
+      } catch (err) {
+        console.warn("[XDX] voicemail_available handler failed", err);
+      }
+    });
+
+    // Listen for Omiai friend events relayed via lobby channel
+    const unsubFriendReq = bridge.current.onFriendRequestReceived((data) => {
+      console.info("[XDX] Omiai friend request received", data);
+      const fromCode = (data.from_quicdial_id || data.fromQuicdialId || "") as string;
+      const fromName = (data.from_display_name || data.fromDisplayName || fromCode) as string;
+      const fromAvatar = (data.from_avatar_id || data.fromAvatarId || "") as string;
+      if (fromCode) {
+        setPendingFriendRequest({
+          callingCode: fromCode,
+          displayName: fromName,
+          avatarId: fromAvatar,
+        });
+      }
+    });
+
+    const unsubFriendAccepted = bridge.current.onFriendAccepted((data) => {
+      console.info("[XDX] Omiai friend accepted", data);
+      Toast.success({ content: `Friend request accepted!` });
+    });
+
+    const unsubFriendRemoved = bridge.current.onFriendRemoved((data) => {
+      const removedCode = (data.quicdial_id || data.quicdialId || "") as string;
+      if (removedCode) {
+        setFriends((prev) => prev.filter((f) => f.callingCode !== removedCode));
+      }
+    });
+
     init();
     return () => {
       unsub2();
@@ -612,6 +768,10 @@ const AppInner: React.FC = () => {
       unsub6();
       unsub7();
       unsub8();
+      unsub9();
+      unsubFriendReq();
+      unsubFriendAccepted();
+      unsubFriendRemoved();
       bridge.current.destroy();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -1151,6 +1311,7 @@ const AppInner: React.FC = () => {
     setCallState(CallState.Idle);
     setActiveCall(null);
     setPendingOffer(null);
+    bridge.current.resetSignalingMode();
   }, [media]);
 
   const handleProfileChanged = useCallback((p: UserProfile) => {
@@ -1167,13 +1328,14 @@ const AppInner: React.FC = () => {
       try {
         setCallState(CallState.Connecting);
 
-        if (connectedPeer?.code !== code) {
-          const result = await bridge.current.connectToPeer(code);
-          if (!result.success) {
-            Toast.warning({ content: result.message });
-            setCallState(CallState.Idle);
-            return;
-          }
+        // Use dialCode() which has the full fallback chain:
+        // Quicdial+TCP → mDNS TCP → Omiai relay
+        // This is critical for iOS which can't do direct TCP.
+        const dialResult = await bridge.current.dialCode(code, audioOnly);
+        if (!dialResult.success) {
+          Toast.warning({ content: dialResult.message });
+          setCallState(CallState.Idle);
+          return;
         }
         setConnectedPeer({ name: peerName, code });
 
@@ -1204,6 +1366,7 @@ const AppInner: React.FC = () => {
           displayName: prof.displayName,
           audioOnly,
           sdp: offerSdp,
+          targetCode: code,
         });
 
         setActiveCall({
@@ -1224,8 +1387,9 @@ const AppInner: React.FC = () => {
   );
 
   const handleAcceptCall = useCallback(
-    async (audioOnly: boolean) => {
+    async () => {
       if (!pendingOffer) return;
+      const audioOnly = pendingOffer.audioOnly;
       try {
         const stream = await media.startCamera(!audioOnly, true);
         if (!stream) {
@@ -1531,13 +1695,16 @@ const AppInner: React.FC = () => {
       return;
     }
     try {
+      // Send friend request via Omiai server API
+      if (omiaiLoggedIn) {
+        await bridge.current.sendOmiaiFriendRequest(peer.callingCode);
+      }
+      // Also send via P2P signaling for local network peers
       if (connectedPeer?.code !== peer.callingCode) {
         const result = await bridge.current.connectToPeer(peer.callingCode);
-        if (!result.success) {
-          Toast.warning({ content: result.message });
-          return;
+        if (result.success) {
+          setConnectedPeer({ name: peer.displayName, code: peer.callingCode });
         }
-        setConnectedPeer({ name: peer.displayName, code: peer.callingCode });
       }
       const prof = profile ?? (await bridge.current.getProfile());
       await bridge.current.sendSignal({
@@ -1545,18 +1712,23 @@ const AppInner: React.FC = () => {
         callingCode: prof.callingCode,
         displayName: prof.displayName,
         avatarId: prof.avatarId,
-      });
+      }).catch(() => {});
       setFriendProfilePeer(null);
       Toast.success({ content: t("friends.requestSent") });
     } catch (err) {
       Toast.error({ content: `${err}` });
     }
-  }, [connectedPeer, friendProfilePeer, isBlockedPeer, profile, t]);
+  }, [connectedPeer, friendProfilePeer, isBlockedPeer, omiaiLoggedIn, profile, t]);
 
   const handleRemoveFriend = useCallback(async () => {
     const peer = friendProfilePeer;
     if (!peer) return;
     try {
+      // Remove via Omiai server
+      if (omiaiLoggedIn) {
+        await bridge.current.removeOmiaiFriend(peer.callingCode).catch(() => {});
+      }
+      // Remove locally
       await bridge.current.removeFriend(peer.callingCode);
       setFriends((prev) =>
         prev.filter((friend) => friend.callingCode !== peer.callingCode),
@@ -1566,7 +1738,7 @@ const AppInner: React.FC = () => {
     } catch (err) {
       Toast.error({ content: `${err}` });
     }
-  }, [friendProfilePeer, t]);
+  }, [friendProfilePeer, omiaiLoggedIn, t]);
 
   const handleToggleBlock = useCallback(async () => {
     const peer = friendProfilePeer;
@@ -1887,7 +2059,22 @@ const AppInner: React.FC = () => {
     if (sent) {
       Toast.success({ content: t("voicemail.sent") });
     } else {
-      Toast.warning({ content: t("voicemail.sendFailed") });
+      // Fallback: deposit via Omiai relay for offline delivery
+      try {
+        const bytes = new Uint8Array(buffer);
+        let binary = "";
+        for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+        const dataB64 = btoa(binary);
+        await bridge.current.depositVoicemail({
+          toCode: peerCode!,
+          dataB64,
+          metadata: { fileName, mimeType: blob.type },
+        });
+        Toast.success({ content: t("voicemail.dropboxDelivered") });
+      } catch (dropboxErr) {
+        console.warn("[XDX] voicemail dropbox deposit failed", dropboxErr);
+        Toast.warning({ content: t("voicemail.sendFailed") });
+      }
     }
     await handleEndCall();
   }, [getFriendByCode, handleEndCall, sendTransfer, t]);
@@ -1990,6 +2177,7 @@ const AppInner: React.FC = () => {
         displayName: prof.displayName,
         audioOnly,
         sdp: offerSdp,
+        targetCode: code,
       });
 
       setActiveCall({
@@ -2065,14 +2253,31 @@ const AppInner: React.FC = () => {
     };
   }, [callState]);
 
+  // Merge mDNS-discovered peers with Omiai presence peers
+  const mergedPeers: DiscoveredPeer[] = (() => {
+    const mdnsMap = new Map(peers.map((p) => [p.callingCode, p]));
+    // Add Omiai presence peers that aren't already in the mDNS list
+    for (const op of omiaiPresencePeers) {
+      if (!mdnsMap.has(op.quicdialId)) {
+        mdnsMap.set(op.quicdialId, {
+          callingCode: op.quicdialId,
+          displayName: op.displayName,
+          addresses: op.ip ? [op.ip] : [],
+          port: 0,
+        });
+      }
+    }
+    return Array.from(mdnsMap.values());
+  })();
+
   const friendCodeSet = new Set(friends.map((f) => f.callingCode));
   const searchedPeers = (searchQuery
-    ? peers.filter(
+    ? mergedPeers.filter(
         (p) =>
           p.displayName.toLowerCase().includes(searchQuery.toLowerCase()) ||
           p.callingCode.includes(searchQuery),
       )
-    : peers
+    : mergedPeers
   )
     .slice()
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -2090,17 +2295,23 @@ const AppInner: React.FC = () => {
 
   // -- Render sidebar --
   const renderSidebar = () => {
-    const ownAvatar = getAvatarSrc(profile?.avatarId) ?? foxBandana;
     const voicemailEntries = downloads.filter((entry) => entry.kind === "voicemail");
-    const sidebarTabs: Array<{
+    const allSidebarTabs: Array<{
       key: SidebarTab;
       icon: React.ReactNode;
       label: string;
+      mobileOnly?: boolean;
     }> = [
       {
         key: "peers",
         icon: <IconUser size="small" />,
         label: t("sidebar.peers"),
+      },
+      {
+        key: "dial",
+        icon: <IconPhone size="small" />,
+        label: t("sidebar.dial"),
+        mobileOnly: true,
       },
       {
         key: "voicemail",
@@ -2113,6 +2324,9 @@ const AppInner: React.FC = () => {
         label: t("sidebar.downloads"),
       },
     ];
+    const sidebarTabs = isMobile
+      ? allSidebarTabs
+      : allSidebarTabs.filter((tab) => !tab.mobileOnly);
 
     return (
       <div className="xdx-sidebar">
@@ -2123,34 +2337,66 @@ const AppInner: React.FC = () => {
         >
           <div className="xdx-titlebar-spacer" />
           <div className="xdx-titlebar-title">
-            <img
-              src={ownAvatar}
-              alt=""
-              className="xdx-titlebar-icon"
-            />
-            <span>{t("app.name")}</span>
+            <span className="xdx-titlebar-brand">TREAT</span>
           </div>
         </div>
 
         <div className="xdx-sidebar-header">
-          <div className="xdx-app-brand">
-            <div className="xdx-brand-icon">
-              <img src={ownAvatar} alt="" className="xdx-brand-img" />
+          <div className="xdx-sidebar-header-top">
+            <div className="xdx-app-brand">
+              {omiaiUser ? (
+                <>
+                  <Avatar
+                    size="small"
+                    src={getAvatarSrc(omiaiUser.avatarId)}
+                    style={{
+                      background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                      marginRight: 10,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {omiaiUser.displayName.charAt(0)}
+                  </Avatar>
+                  <div className="xdx-brand-text">
+                    <Title heading={5} style={{ color: "#fff", margin: 0 }}>
+                      {omiaiUser.displayName}
+                    </Title>
+                    <Text
+                      size="small"
+                      style={{
+                        color: "rgba(255,255,255,0.52)",
+                        fontSize: 11,
+                      }}
+                    >
+                      {profile?.callingCode || t("app.subtitle")}
+                    </Text>
+                  </div>
+                </>
+              ) : (
+                <div className="xdx-brand-text">
+                  <Title heading={5} style={{ color: "#fff", margin: 0 }}>
+                    TREAT
+                  </Title>
+                  <Text
+                    size="small"
+                    style={{
+                      color: "rgba(255,255,255,0.52)",
+                      fontSize: 11,
+                    }}
+                  >
+                    {t("app.nameCn")} · {t("app.subtitle")}
+                  </Text>
+                </div>
+              )}
             </div>
-            <div className="xdx-brand-text">
-              <Title heading={5} style={{ color: "#fff", margin: 0 }}>
-                {t("app.name")}
-              </Title>
-              <Text
-                size="small"
-                style={{
-                  color: "rgba(255,255,255,0.52)",
-                  fontSize: 11,
-                }}
+            <Tooltip content={t("sidebar.settings")} position="top">
+              <button
+                className="xdx-sidebar-settings-btn"
+                onClick={() => setSettingsOpen(true)}
               >
-                {t("app.nameCn")} · {t("app.subtitle")}
-              </Text>
-            </div>
+                <IconSetting size="small" />
+              </button>
+            </Tooltip>
           </div>
           <div className="xdx-sidebar-search">
             <IconSearch style={{ color: "rgba(255,255,255,0.32)" }} size="small" />
@@ -2447,103 +2693,71 @@ const AppInner: React.FC = () => {
           )}
         </div>
 
-        <div
-          className={`xdx-sidebar-footer xdx-footer-dial-anchor ${
-            dialPadOpen ? "dial-open" : ""
-          }`}
-          onClick={() => setDialPadOpen((open) => !open)}
-        >
-          <div className="xdx-sidebar-footer-main">
-            <Tooltip content={t("sidebar.settings")} position="top">
-              <button
-                className="xdx-footer-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setSettingsOpen(true);
-                }}
-              >
-                <IconSetting size="small" />
-              </button>
-            </Tooltip>
-            <div className="xdx-core-status">
-              <span className={`xdx-engine-dot ${coreReady ? "ready" : ""}`} />
-              <Text
-                size="small"
-                style={{ color: "rgba(255,255,255,0.45)", fontSize: 11 }}
-              >
-                {coreReady ? t("sidebar.engineReady") : t("sidebar.engineOffline")}
-              </Text>
+        {/* Slide-up dial drawer (mobile) */}
+        {isMobile && (
+          <div className={`xdx-dial-drawer ${dialDrawerOpen ? "open" : ""}`}>
+            <button
+              className="xdx-dial-drawer-handle"
+              onClick={() => setDialDrawerOpen(false)}
+              aria-label="Close dialer"
+            >
+              <span className="xdx-dial-drawer-grip" />
+            </button>
+            <div className="xdx-dial-drawer-body">
+              {profile ? (
+                <DialPad
+                  expanded={true}
+                  callingCode={profile.callingCode}
+                  onCallStarted={(result, audioOnly) => {
+                    setDialDrawerOpen(false);
+                    void handleDialCallStarted(result, audioOnly);
+                  }}
+                />
+              ) : (
+                <div className="xdx-dialpad-main-loading">
+                  <Spin />
+                  <Text size="small" style={{ color: "rgba(255,255,255,0.5)" }}>
+                    {t("sidebar.connecting")}
+                  </Text>
+                </div>
+              )}
             </div>
-            <Tooltip content={t("sidebar.dial")} position="top">
-              <button
-                className={`xdx-footer-btn xdx-footer-btn-dial ${dialPadOpen ? "active" : ""}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDialPadOpen((open) => !open);
-                }}
-              >
-                <IconPhone size="small" />
-              </button>
-            </Tooltip>
           </div>
-
-          <div
-            className={`xdx-sidebar-dial-drawer ${dialPadOpen ? "open" : ""}`}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="xdx-sidebar-dial-drawer-header">
-              <Text className="xdx-sidebar-dial-drawer-title">{t("dialpad.title")}</Text>
-              <button
-                className="xdx-sidebar-dial-drawer-close"
-                onClick={() => setDialPadOpen(false)}
-              >
-                <IconClose size="small" />
-              </button>
-            </div>
-            {profile && (
-              <DialPad
-                callingCode={profile.callingCode}
-                onCallStarted={(result, audioOnly) => {
-                  setDialPadOpen(false);
-                  void handleDialCallStarted(result, audioOnly);
-                }}
-              />
-            )}
-          </div>
-        </div>
+        )}
 
         <div className="xdx-sidebar-tabs">
-          {sidebarTabs.map((tab, index) => (
-            <React.Fragment key={tab.key}>
-              {index === 1 && (
-                <button
-                  type="button"
-                  className="xdx-tab xdx-tab-dial-action"
-                  onClick={() => setDialPadOpen((open) => !open)}
-                >
-                  <IconPhone size="small" />
-                  <span>{t("sidebar.dial")}</span>
-                </button>
-              )}
-              <button
-                type="button"
-                className={`xdx-tab ${sidebarTab === tab.key ? "active" : ""}`}
-                onClick={() => {
+          {sidebarTabs.map((tab) => (
+            <button
+              key={tab.key}
+              type="button"
+              className={`xdx-tab ${
+                tab.key === "dial"
+                  ? dialDrawerOpen ? "active" : ""
+                  : sidebarTab === tab.key ? "active" : ""
+              }`}
+              onClick={() => {
+                if (tab.key === "dial") {
+                  setDialDrawerOpen((v) => !v);
+                } else {
                   setSidebarTab(tab.key);
+                  setDialDrawerOpen(false);
                   if (tab.key === "voicemail") {
                     setVoicemailUnread(0);
                   }
-                }}
-              >
-                {tab.icon}
-                <span>{tab.label}</span>
-                {tab.key === "voicemail" && voicemailUnread > 0 && (
-                  <span className="xdx-unread-badge">
-                    {Math.min(voicemailUnread, 99)}
-                  </span>
-                )}
-              </button>
-            </React.Fragment>
+                }
+              }}
+            >
+              {tab.icon}
+              <span>{tab.label}</span>
+              {tab.key === "peers" && (
+                <span className={`xdx-engine-dot ${coreReady ? "ready" : ""}`} />
+              )}
+              {tab.key === "voicemail" && voicemailUnread > 0 && (
+                <span className="xdx-unread-badge">
+                  {Math.min(voicemailUnread, 99)}
+                </span>
+              )}
+            </button>
           ))}
         </div>
       </div>
@@ -2610,6 +2824,37 @@ const AppInner: React.FC = () => {
     </div>
   );
 
+  const renderDefaultDialPad = () => (
+    <div className="xdx-dialpad-main-view">
+      <div className="xdx-dialpad-main-panel">
+        <div className="xdx-dialpad-main-header">
+          <Title heading={5} style={{ color: "#fff", margin: 0 }}>
+            {t("dialpad.title")}
+          </Title>
+          <Text size="small" style={{ color: "rgba(255,255,255,0.45)" }}>
+            {t("app.selectContact")}
+          </Text>
+        </div>
+        {profile ? (
+          <DialPad
+            expanded={true}
+            callingCode={profile.callingCode}
+            onCallStarted={(result, audioOnly) => {
+              void handleDialCallStarted(result, audioOnly);
+            }}
+          />
+        ) : (
+          <div className="xdx-dialpad-main-loading">
+            <Spin />
+            <Text size="small" style={{ color: "rgba(255,255,255,0.5)" }}>
+              {t("sidebar.connecting")}
+            </Text>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
   // -- Connecting --
   const renderConnecting = () => (
     <div className="xdx-connecting">
@@ -2644,6 +2889,27 @@ const AppInner: React.FC = () => {
     getFriendByCode(activeCall?.peerId ?? connectedPeer?.code)?.voicemailKey,
   );
   const mobileEngaged = isMobile && (chatOpen || callState !== CallState.Idle);
+  const showDefaultDialPad =
+    callState === CallState.Idle && !connectedPeer && !chatOpen && !isMobile;
+
+  // Show loading spinner while checking stored auth token
+  if (checkingAuth) {
+    return (
+      <div className="xdx-login-screen">
+        <Spin size="large" />
+      </div>
+    );
+  }
+
+  // Gate: require Omiai login before showing the main UI
+  if (!omiaiLoggedIn) {
+    return (
+      <LoginScreen
+        callingCode={profile?.callingCode || ""}
+        onAuthenticated={handleAuthenticated}
+      />
+    );
+  }
 
   return (
     <>
@@ -2655,7 +2921,8 @@ const AppInner: React.FC = () => {
         <Sider className="xdx-sider">{renderSidebar()}</Sider>
         <Content className="xdx-content">
           <div className={`xdx-content-main ${chatOpen && (connectedPeer || inCall) ? "with-chat" : ""}`}>
-            {callState === CallState.Idle && renderIdleContent()}
+            {showDefaultDialPad && renderDefaultDialPad()}
+            {callState === CallState.Idle && !showDefaultDialPad && renderIdleContent()}
             {callState === CallState.Connecting && renderConnecting()}
             {inCall && activeCall && (
               <CallView
@@ -2775,10 +3042,12 @@ const AppInner: React.FC = () => {
               </div>
               <div className="xdx-call-action">
                 <button
-                  className="xdx-btn-audio"
-                  onClick={() => handleAcceptCall(true)}
+                  className={pendingOffer.audioOnly ? "xdx-btn-audio" : "xdx-btn-accept"}
+                  onClick={() => handleAcceptCall()}
                 >
-                  <IconMicrophone size="extra-large" />
+                  {pendingOffer.audioOnly
+                    ? <IconMicrophone size="extra-large" />
+                    : <IconCamera size="extra-large" />}
                 </button>
                 <Text
                   size="small"
@@ -2787,24 +3056,7 @@ const AppInner: React.FC = () => {
                     marginTop: 8,
                   }}
                 >
-                  {t("incoming.audio")}
-                </Text>
-              </div>
-              <div className="xdx-call-action">
-                <button
-                  className="xdx-btn-accept"
-                  onClick={() => handleAcceptCall(false)}
-                >
-                  <IconCamera size="extra-large" />
-                </button>
-                <Text
-                  size="small"
-                  style={{
-                    color: "rgba(255,255,255,0.45)",
-                    marginTop: 8,
-                  }}
-                >
-                  {t("incoming.video")}
+                  {t("incoming.accept")}
                 </Text>
               </div>
             </div>
@@ -2846,6 +3098,8 @@ const AppInner: React.FC = () => {
         }}
         uiScale={uiScale}
         onUiScaleChange={setUiScale}
+        omiaiDisplayName={omiaiUser?.displayName}
+        onLogout={handleLogout}
       />
     </>
   );

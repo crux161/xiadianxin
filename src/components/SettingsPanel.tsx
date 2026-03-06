@@ -8,7 +8,11 @@ import type {
   UserProfile,
   LocaleCode,
 } from "../types/call";
-import SankakuBridge from "../services/SankakuBridge";
+import SankakuBridge, {
+  DEFAULT_OMIAI_WS_URL,
+  OMIAI_WS_URL_CHANGED_EVENT,
+  OMIAI_WS_URL_STORAGE_KEY,
+} from "../services/SankakuBridge";
 
 import foxImg from "../../reference/images/kyu-kun/fox.jpg";
 import foxOkImg from "../../reference/images/kyu-kun/fox-maru-green-OK.jpeg";
@@ -45,6 +49,8 @@ interface Props {
   onDownloadDirectoryChanged: () => void;
   uiScale: number;
   onUiScaleChange: (value: number) => void;
+  omiaiDisplayName?: string;
+  onLogout?: () => void;
 }
 
 const SettingsPanel: React.FC<Props> = ({
@@ -56,6 +62,8 @@ const SettingsPanel: React.FC<Props> = ({
   onDownloadDirectoryChanged,
   uiScale,
   onUiScaleChange,
+  omiaiDisplayName,
+  onLogout,
 }) => {
   const { t } = useI18n();
   const [displayName, setDisplayName] = useState("");
@@ -65,6 +73,7 @@ const SettingsPanel: React.FC<Props> = ({
   const [customAvatarUrl, setCustomAvatarUrl] = useState<string | null>(null);
   const [downloadLocation, setDownloadLocation] = useState("");
   const [downloadManaged, setDownloadManaged] = useState(false);
+  const [omiaiWsUrl, setOmiaiWsUrl] = useState(DEFAULT_OMIAI_WS_URL);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -77,6 +86,11 @@ const SettingsPanel: React.FC<Props> = ({
 
   useEffect(() => {
     if (open) {
+      const storedOmiaiUrl =
+        window.localStorage.getItem(OMIAI_WS_URL_STORAGE_KEY) ||
+        DEFAULT_OMIAI_WS_URL;
+      setOmiaiWsUrl(storedOmiaiUrl);
+
       SankakuBridge.getInstance()
         .loadCustomAvatar()
         .then((data) => {
@@ -120,6 +134,20 @@ const SettingsPanel: React.FC<Props> = ({
           onDownloadDirectoryChanged();
         }
       }
+
+      const normalizedOmiaiUrl = omiaiWsUrl.trim() || DEFAULT_OMIAI_WS_URL;
+      const previousOmiaiUrl =
+        window.localStorage.getItem(OMIAI_WS_URL_STORAGE_KEY) ||
+        DEFAULT_OMIAI_WS_URL;
+      window.localStorage.setItem(OMIAI_WS_URL_STORAGE_KEY, normalizedOmiaiUrl);
+      if (normalizedOmiaiUrl !== previousOmiaiUrl) {
+        window.dispatchEvent(
+          new CustomEvent(OMIAI_WS_URL_CHANGED_EVENT, {
+            detail: { url: normalizedOmiaiUrl },
+          }),
+        );
+      }
+
       onProfileChanged(updated);
       Toast.success({ content: t("toast.profileSaved") });
       onClose();
@@ -178,6 +206,20 @@ const SettingsPanel: React.FC<Props> = ({
                 {codeCopied ? t("idle.copied") : t("idle.copyCode")}
               </button>
             </div>
+          </div>
+
+          <div className="xdx-settings-section xdx-settings-dev-signal">
+            <Text className="xdx-settings-label">{t("settings.customSignalingServer")}</Text>
+            <Input
+              value={omiaiWsUrl}
+              onChange={(v) => setOmiaiWsUrl(v)}
+              className="xdx-settings-input xdx-settings-input-dev"
+              size="large"
+              placeholder={t("settings.customSignalingServerPlaceholder")}
+            />
+            <Text size="small" className="xdx-settings-dev-signal-hint">
+              {t("settings.customSignalingServerHint")}
+            </Text>
           </div>
 
           <div className="xdx-settings-section">
@@ -346,6 +388,16 @@ const SettingsPanel: React.FC<Props> = ({
         </div>
 
         <div className="xdx-settings-footer">
+          {onLogout && (
+            <Button
+              theme="borderless"
+              style={{ color: "#ff6b6b", marginRight: "auto" }}
+              onClick={onLogout}
+            >
+              {t("auth.logoutBtn")}
+              {omiaiDisplayName ? ` (${omiaiDisplayName})` : ""}
+            </Button>
+          )}
           <Button theme="borderless" style={{ color: "rgba(255,255,255,0.5)" }} onClick={onClose}>
             {t("settings.cancel")}
           </Button>

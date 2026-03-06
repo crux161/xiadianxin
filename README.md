@@ -38,13 +38,14 @@
 |---------|--------|
 | Real webcam capture (`getUserMedia`) | Implemented |
 | mDNS peer discovery (IPv4 + IPv6) | Implemented |
+| iOS-safe mDNS degradation (permission-denied -> non-fatal fallback) | Implemented |
 | 9-digit calling codes (###-###-###) | Implemented |
 | Local profile storage | Implemented |
 | Localization (English / Chinese) | Implemented |
 | Reference art in event cards | Implemented |
 | Tally lights (CAM / MIC live indicators) | Implemented |
 | Voicemail recording UI | Implemented |
-| Inline bottom-left expandable Dial drawer | Implemented |
+| Default-expanded DialPad when no chat/call is selected | Implemented |
 | iOS-safe keypad input (`readOnly` + `inputMode="none"`) | Implemented |
 | Quicdial QR generation in Settings | Implemented |
 | Quicdial QR scanning (camera + image import) | Implemented |
@@ -57,8 +58,8 @@
 | File | Role |
 |------|------|
 | `src-tauri/src/lib.rs` | Backend — mDNS (mdns-sd), profile persistence, calling codes, stubbed Sankaku transport |
-| `src/services/SankakuBridge.ts` | IPC + Omiai bridge — `invoke()`/`listen()`, Phoenix socket join, `resolve_quicdial`, direct dial handoff |
-| `src/App.tsx` | Shell — i18n layout, real peer list, bottom-left expandable Dial drawer, settings |
+| `src/services/SankakuBridge.ts` | IPC + Omiai bridge — `invoke()`/`listen()`, Omiai mDNS discovery (`_omiai._tcp`), startup registration push, `resolve_quicdial`, direct dial handoff |
+| `src/App.tsx` | Shell — i18n layout, real peer list, cleaned sidebar header, default-expanded DialPad empty state, settings |
 | `src/components/CallView.tsx` | In-call — real webcam via `getUserMedia`, tally lights, control bar, voicemail |
 | `src/components/SettingsPanel.tsx` | Settings — profile editor, Quicdial QR display, language toggle, avatar picker |
 | `src/components/DialPad.tsx` | Dial — keypad-only 9-digit input, iOS-safe field attributes, QR scan/import workflow |
@@ -92,8 +93,8 @@ Each instance generates a unique calling code at first launch (e.g. `418-073-926
 The code is stored in `~/.local/share/com.saffron.xiadianxin/profile.json` and
 advertised via mDNS TXT records on `_xiadianxin._udp.local.`.
 
-To call another instance, enter their code in the Dial tab or click a discovered
-peer in the Peers tab.
+To call another instance, enter their code in the default DialPad (shown when no
+chat/call is selected) or click a discovered peer in the Peers tab.
 
 ## Prerequisites
 
@@ -116,14 +117,23 @@ network appear automatically in the Peers tab.
 
 ### Localization
 
-Default language is **English**. Switch to Chinese in Settings (gear icon in sidebar footer).
+Default language is **English**. Switch to Chinese in Settings (gear icon in the sidebar header).
 The language preference persists in `profile.json`.
 
 ### Omiai WebSocket
 
-By default, Quicdial resolution connects to:
+On startup, the bridge performs Bonjour/mDNS discovery for `_omiai._tcp` and
+auto-connects to the first resolved LAN Omiai node:
 
-`ws://<current-host>:4000/ws/sankaku`
+`ws://<resolved-ip>:<port>/ws/sankaku/websocket`
+
+If discovery times out, it falls back to:
+
+`ws://localhost:4000/ws/sankaku/websocket`
+
+If mDNS is blocked by iOS local-network sandbox permissions (for example
+`Operation not permitted` on UDP 5353), discovery now fails gracefully and the
+bridge continues with the stored override / fallback URL path.
 
 Override with:
 
@@ -135,6 +145,17 @@ When you tap call from the DialPad, the app now:
 1. pushes `resolve_quicdial` to Omiai
 2. receives target IP for the entered/scanned Quicdial code
 3. invokes Tauri `dial_quicdial` with both `{code, ip}`
+
+At startup (before user interaction), the bridge also joins `peer:<public_key>`
+and pushes canonical registration payload:
+
+`{public_key, session_token, sig_ts, sig_nonce}`
+
+For iOS/LAN testing, Settings now includes **Custom Signaling Server (Dev)**.
+It stores `OMIAI_WS_URL` in localStorage and the bridge reconnects when changed.
+Default value:
+
+`ws://localhost:4000/ws/sankaku/websocket`
 
 ## Sankaku/RT Integration
 
