@@ -105,9 +105,6 @@ const CallView: React.FC<Props> = ({
   const [isPortraitCompact, setIsPortraitCompact] = useState<boolean>(() =>
     isPortraitTouchViewport(),
   );
-  const [showControlDrawer, setShowControlDrawer] = useState<boolean>(
-    () => !isPortraitTouchViewport(),
-  );
 
   useEffect(() => {
     if (localVideoRef.current && localStream) {
@@ -158,9 +155,7 @@ const CallView: React.FC<Props> = ({
     return () => window.removeEventListener("resize", syncViewport);
   }, []);
 
-  useEffect(() => {
-    setShowControlDrawer(!isPortraitCompact);
-  }, [isPortraitCompact, callState]);
+  // Controls are always visible now (no drawer state needed)
 
   const handleStartRecording = useCallback(() => {
     onRecordVoicemail()
@@ -289,7 +284,7 @@ const CallView: React.FC<Props> = ({
   const hasRemoteVideo = !!remoteStream;
   const bitrateMbps = ((metrics?.bitrateBps ?? 0) / 1_000_000).toFixed(2);
   const lossPercent = (metrics?.packetLossPercent ?? 0).toFixed(2);
-  const controlDrawerState = showControlDrawer ? "expanded" : "collapsed";
+  // Controls are always visible (no drawer collapse)
 
   return (
     <div className={`xdx-call-view ${isPortraitCompact ? "xdx-call-mobile-portrait" : ""}`}>
@@ -476,78 +471,26 @@ const CallView: React.FC<Props> = ({
         )}
       </div>
 
-      {/* Control bar */}
-      {isPortraitCompact && (
-        <button
-          type="button"
-          className={`xdx-call-controls-toggle ${controlDrawerState}`}
-          onClick={() => setShowControlDrawer((prev) => !prev)}
-          aria-label={
-            showControlDrawer ? t("call.hideControls") : t("call.showControls")
-          }
-        >
-          <IconSetting size="large" />
-        </button>
-      )}
-      {isAudioOnlyCall ? (
-        <div
-          className={`xdx-control-bar xdx-control-bar-audio ${
-            isPortraitCompact ? `xdx-control-bar-floating ${controlDrawerState}` : ""
-          }`}
-        >
-          <div className="xdx-control-bar-inner xdx-control-bar-inner-audio">
-            <Tooltip
-              content={micOn ? t("call.mute") : t("call.unmute")}
-              position="top"
+      {/* Control bar — always visible, even on mobile portrait */}
+      <div
+        className={`xdx-control-bar ${isAudioOnlyCall ? "xdx-control-bar-audio" : ""} ${
+          isPortraitCompact ? "xdx-control-bar-mobile" : ""
+        }`}
+      >
+        <div className={`xdx-control-bar-inner ${isAudioOnlyCall ? "xdx-control-bar-inner-audio" : ""}`}>
+          <Tooltip
+            content={micOn ? t("call.mute") : t("call.unmute")}
+            position="top"
+          >
+            <button
+              className={`xdx-ctrl-btn ${isAudioOnlyCall ? "xdx-ctrl-btn-audio" : ""} ${!micOn ? "toggled-off" : ""}`}
+              onClick={onToggleMic}
             >
-              <button
-                className={`xdx-ctrl-btn xdx-ctrl-btn-audio ${!micOn ? "toggled-off" : ""}`}
-                onClick={onToggleMic}
-              >
-                <IconMicrophone size="extra-large" />
-                {!micOn && <span className="xdx-slash-overlay" />}
-              </button>
-            </Tooltip>
-            <Tooltip content={t("chat.title")} position="top">
-              <button
-                className={`xdx-ctrl-btn xdx-ctrl-btn-audio ${chatOpen ? "active" : ""}`}
-                onClick={onToggleChat}
-              >
-                <IconComment size="extra-large" />
-                {unreadChat > 0 && (
-                  <span className="xdx-unread-badge">{unreadChat}</span>
-                )}
-              </button>
-            </Tooltip>
-            <Tooltip content={t("call.endCall")} position="top">
-              <button
-                className="xdx-ctrl-btn xdx-btn-end xdx-ctrl-btn-audio xdx-ctrl-btn-audio-end"
-                onClick={onEndCall}
-              >
-                <IconClose size="extra-large" />
-              </button>
-            </Tooltip>
-          </div>
-        </div>
-      ) : (
-        <div
-          className={`xdx-control-bar ${
-            isPortraitCompact ? `xdx-control-bar-floating ${controlDrawerState}` : ""
-          }`}
-        >
-          <div className="xdx-control-bar-inner">
-            <Tooltip
-              content={micOn ? t("call.mute") : t("call.unmute")}
-              position="top"
-            >
-              <button
-                className={`xdx-ctrl-btn ${!micOn ? "toggled-off" : ""}`}
-                onClick={onToggleMic}
-              >
-                <IconMicrophone size="extra-large" />
-                {!micOn && <span className="xdx-slash-overlay" />}
-              </button>
-            </Tooltip>
+              <IconMicrophone size="extra-large" />
+              {!micOn && <span className="xdx-slash-overlay" />}
+            </button>
+          </Tooltip>
+          {!isAudioOnlyCall && (
             <Tooltip
               content={cameraOn ? t("call.cameraOff") : t("call.cameraOn")}
               position="top"
@@ -560,32 +503,35 @@ const CallView: React.FC<Props> = ({
                 {!cameraOn && <span className="xdx-slash-overlay" />}
               </button>
             </Tooltip>
-            <Tooltip content={t("chat.title")} position="top">
-              <button
-                className={`xdx-ctrl-btn ${chatOpen ? "active" : ""}`}
-                onClick={onToggleChat}
-              >
-                <IconComment size="extra-large" />
-                {unreadChat > 0 && (
-                  <span className="xdx-unread-badge">{unreadChat}</span>
-                )}
+          )}
+          <Tooltip content={t("chat.title")} position="top">
+            <button
+              className={`xdx-ctrl-btn ${isAudioOnlyCall ? "xdx-ctrl-btn-audio" : ""} ${chatOpen ? "active" : ""}`}
+              onClick={onToggleChat}
+            >
+              <IconComment size="extra-large" />
+              {unreadChat > 0 && (
+                <span className="xdx-unread-badge">{unreadChat}</span>
+              )}
+            </button>
+          </Tooltip>
+          {!isPortraitCompact && !isAudioOnlyCall && (
+            <Tooltip content={t("call.shareScreen")} position="top">
+              <button className="xdx-ctrl-btn">
+                <IconDesktop size="extra-large" />
               </button>
             </Tooltip>
-            {!isPortraitCompact && (
-              <Tooltip content={t("call.shareScreen")} position="top">
-                <button className="xdx-ctrl-btn">
-                  <IconDesktop size="extra-large" />
-                </button>
-              </Tooltip>
-            )}
-            <Tooltip content={t("call.endCall")} position="top">
-              <button className="xdx-ctrl-btn xdx-btn-end" onClick={onEndCall}>
-                <IconClose size="extra-large" />
-              </button>
-            </Tooltip>
-          </div>
+          )}
+          <Tooltip content={t("call.endCall")} position="top">
+            <button
+              className={`xdx-ctrl-btn xdx-btn-end ${isAudioOnlyCall ? "xdx-ctrl-btn-audio xdx-ctrl-btn-audio-end" : ""}`}
+              onClick={onEndCall}
+            >
+              <IconClose size="extra-large" />
+            </button>
+          </Tooltip>
         </div>
-      )}
+      </div>
     </div>
   );
 };

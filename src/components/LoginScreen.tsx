@@ -26,9 +26,10 @@ const SIGNUP_AVATARS = [
 interface Props {
   callingCode: string;
   onAuthenticated: (user: OmiaiUser, token: string) => void;
+  onLocalMode?: () => void;
 }
 
-const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated }) => {
+const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMode }) => {
   const { t } = useI18n();
   const bridge = SankakuBridge.getInstance();
 
@@ -339,6 +340,16 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated }) => {
         >
           {t("auth.hint")}
         </Text>
+
+        {onLocalMode && (
+          <button
+            className="xdx-local-mode-btn"
+            onClick={onLocalMode}
+            type="button"
+          >
+            {t("auth.localMode")}
+          </button>
+        )}
       </div>
     </div>
   );

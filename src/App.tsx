@@ -19,6 +19,9 @@ import {
   IconMicrophone,
   IconDownload,
   IconPhone,
+  IconPlus,
+  IconDelete,
+  IconUserAdd,
 } from "@douyinfe/semi-icons";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { I18nProvider, useI18n } from "./i18n/index";
@@ -361,6 +364,9 @@ const AppInner: React.FC = () => {
   const [omiaiLoggedIn, setOmiaiLoggedIn] = useState(false);
   const [omiaiPresencePeers, setOmiaiPresencePeers] = useState<PresencePeer[]>([]);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [localMode, setLocalMode] = useState(false);
+  const [addFriendDialogOpen, setAddFriendDialogOpen] = useState(false);
+  const [addFriendCode, setAddFriendCode] = useState("");
 
   useEffect(() => {
     fileTransfersRef.current = fileTransfers;
@@ -546,7 +552,53 @@ const AppInner: React.FC = () => {
     setOmiaiUser(null);
     setOmiaiLoggedIn(false);
     setOmiaiPresencePeers([]);
+    setLocalMode(true);
   }, []);
+
+  const handleEnterLocalMode = useCallback(() => {
+    setLocalMode(true);
+  }, []);
+
+  const handleExitLocalMode = useCallback(() => {
+    setLocalMode(false);
+  }, []);
+
+  const handleAddFriendFromList = useCallback(async () => {
+    const code = addFriendCode.trim();
+    if (!code) return;
+    try {
+      await bridge.current.sendOmiaiFriendRequest(code);
+      Toast.success({ content: `${t("friends.sendRequest")} → ${code}` });
+      setAddFriendCode("");
+      setAddFriendDialogOpen(false);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed";
+      Toast.error({ content: msg });
+    }
+  }, [addFriendCode, t]);
+
+  const handleInlineAddFriend = useCallback(async (code: string) => {
+    try {
+      await bridge.current.sendOmiaiFriendRequest(code);
+      Toast.success({ content: `${t("friends.sendRequest")} → ${code}` });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed";
+      Toast.error({ content: msg });
+    }
+  }, [t]);
+
+  const handleInlineRemoveFriend = useCallback(async (code: string) => {
+    try {
+      await bridge.current.removeOmiaiFriend(code);
+      // Also remove local friend record
+      await bridge.current.removeFriend(code);
+      setFriends((prev) => prev.filter((f) => f.callingCode !== code));
+      Toast.success({ content: t("friends.remove") });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed";
+      Toast.error({ content: msg });
+    }
+  }, [t]);
 
   // Bootstrap
   useEffect(() => {
@@ -2253,13 +2305,22 @@ const AppInner: React.FC = () => {
     };
   }, [callState]);
 
-  // Merge mDNS-discovered peers with Omiai presence peers
+  // Merge peers: When logged in, show only Omiai presence peers.
+  // In local mode (not logged in), show mDNS-discovered peers.
   const mergedPeers: DiscoveredPeer[] = (() => {
+    if (!omiaiLoggedIn) {
+      // Local mode — mDNS only
+      return peers;
+    }
+    // Logged in — Omiai presence peers, augmented with mDNS data when available
     const mdnsMap = new Map(peers.map((p) => [p.callingCode, p]));
-    // Add Omiai presence peers that aren't already in the mDNS list
+    const result: DiscoveredPeer[] = [];
     for (const op of omiaiPresencePeers) {
-      if (!mdnsMap.has(op.quicdialId)) {
-        mdnsMap.set(op.quicdialId, {
+      const mdnsPeer = mdnsMap.get(op.quicdialId);
+      if (mdnsPeer) {
+        result.push(mdnsPeer); // prefer mDNS peer (has IP/port)
+      } else {
+        result.push({
           callingCode: op.quicdialId,
           displayName: op.displayName,
           addresses: op.ip ? [op.ip] : [],
@@ -2267,7 +2328,7 @@ const AppInner: React.FC = () => {
         });
       }
     }
-    return Array.from(mdnsMap.values());
+    return result;
   })();
 
   const friendCodeSet = new Set(friends.map((f) => f.callingCode));
@@ -2412,6 +2473,34 @@ const AppInner: React.FC = () => {
         <div className="xdx-contact-list">
           {sidebarTab === "peers" && (
             <>
+              {/* Add Friend button (only when logged in) */}
+              {omiaiLoggedIn && (
+                <div className="xdx-add-friend-bar">
+                  {addFriendDialogOpen ? (
+                    <div className="xdx-add-friend-form">
+                      <input
+                        className="xdx-add-friend-input"
+                        placeholder={t("auth.addFriendPlaceholder")}
+                        value={addFriendCode}
+                        onChange={(e) => setAddFriendCode(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") void handleAddFriendFromList(); }}
+                        autoFocus
+                      />
+                      <button className="xdx-add-friend-submit" onClick={handleAddFriendFromList}>
+                        <IconUserAdd size="small" />
+                      </button>
+                      <button className="xdx-add-friend-cancel" onClick={() => { setAddFriendDialogOpen(false); setAddFriendCode(""); }}>
+                        <IconClose size="small" />
+                      </button>
+                    </div>
+                  ) : (
+                    <button className="xdx-add-friend-btn" onClick={() => setAddFriendDialogOpen(true)}>
+                      <IconPlus size="small" />
+                      <span>{t("friends.add")}</span>
+                    </button>
+                  )}
+                </div>
+              )}
               {!coreReady ? (
                 <div className="xdx-loading">
                   <Spin size="large" />
@@ -2504,6 +2593,16 @@ const AppInner: React.FC = () => {
                                 <IconMicrophone size="small" />
                               </button>
                             </Tooltip>
+                            {omiaiLoggedIn && (
+                              <Tooltip content={t("friends.remove")} position="top">
+                                <button
+                                  className="xdx-action-btn xdx-action-btn-danger"
+                                  onClick={() => handleInlineRemoveFriend(peer.callingCode)}
+                                >
+                                  <IconDelete size="small" />
+                                </button>
+                              </Tooltip>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2565,6 +2664,16 @@ const AppInner: React.FC = () => {
                                 <IconMicrophone size="small" />
                               </button>
                             </Tooltip>
+                            {omiaiLoggedIn && (
+                              <Tooltip content={t("friends.add")} position="top">
+                                <button
+                                  className="xdx-action-btn xdx-action-btn-add"
+                                  onClick={() => handleInlineAddFriend(peer.callingCode)}
+                                >
+                                  <IconUserAdd size="small" />
+                                </button>
+                              </Tooltip>
+                            )}
                           </div>
                         )}
                       </div>
@@ -2901,12 +3010,13 @@ const AppInner: React.FC = () => {
     );
   }
 
-  // Gate: require Omiai login before showing the main UI
-  if (!omiaiLoggedIn) {
+  // Gate: require Omiai login before showing the main UI (unless local mode)
+  if (!omiaiLoggedIn && !localMode) {
     return (
       <LoginScreen
         callingCode={profile?.callingCode || ""}
         onAuthenticated={handleAuthenticated}
+        onLocalMode={handleEnterLocalMode}
       />
     );
   }
@@ -3099,7 +3209,9 @@ const AppInner: React.FC = () => {
         uiScale={uiScale}
         onUiScaleChange={setUiScale}
         omiaiDisplayName={omiaiUser?.displayName}
-        onLogout={handleLogout}
+        onLogout={omiaiLoggedIn ? handleLogout : undefined}
+        localMode={localMode}
+        onExitLocalMode={handleExitLocalMode}
       />
     </>
   );

@@ -1034,8 +1034,26 @@ class SankakuBridge {
       return;
     }
 
-    // Other message types (chat, file-offer, etc.) are not supported over Omiai relay
-    console.warn("[Bridge] Unsupported signal type for Omiai relay:", message.type);
+    // Chat, typing, file-offer, and other messages — relay through Omiai channel
+    if (!this.omiaiCallContext) {
+      console.warn("[Bridge] No call context for relay_message; dropping", message.type);
+      return;
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      channel
+        .push("relay_message", {
+          to_quicdial_id: this.omiaiCallContext!.callerCode,
+          to_device_uuid: this.omiaiCallContext!.callerDeviceUuid,
+          msg_type: message.type,
+          payload: JSON.stringify(message),
+        })
+        .receive("ok", () => resolve())
+        .receive("error", (payload: unknown) => {
+          reject(new Error(this.extractErrorReason(payload, "omiai_relay_failed")));
+        })
+        .receive("timeout", () => reject(new Error("omiai_relay_timeout")));
+    });
   }
 
   private bindOmiaiSignalingListeners(channel: any): void {
@@ -1107,6 +1125,35 @@ class SankakuBridge {
       // Another device answered — stop ringing locally
       for (const h of this.disconnectListeners) {
         try { h(); } catch (err) { console.error("[Bridge] call_resolved handler error:", err); }
+      }
+    });
+
+    channel.on("relay_message", (payload: Record<string, unknown>) => {
+      // Filter: only accept messages targeted to our device
+      const targetDevice = payload.to_device_uuid as string;
+      if (targetDevice && targetDevice !== this.deviceUuid) return;
+
+      const rawPayload = payload.payload as string;
+      if (!rawPayload) return;
+
+      try {
+        const msg = JSON.parse(rawPayload) as SignalMessage;
+
+        // Update call context so we can reply to the sender
+        const fromCode = payload.from_quicdial_id as string;
+        const fromDeviceUuid = payload.from_device_uuid as string;
+        if (fromCode && fromDeviceUuid) {
+          this.omiaiCallContext = {
+            callerCode: fromCode,
+            callerDeviceUuid: fromDeviceUuid,
+          };
+        }
+
+        for (const h of this.signalingListeners) {
+          try { h(msg); } catch (err) { console.error("[Bridge] Omiai relay_message handler error:", err); }
+        }
+      } catch (err) {
+        console.warn("[Bridge] Failed to parse relay_message payload:", err);
       }
     });
 

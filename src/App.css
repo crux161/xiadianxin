@@ -1800,7 +1800,7 @@ body {
 }
 
 .xdx-settings-panel {
-  width: 440px;
+  width: min(440px, 100vw - 32px);
   max-height: 85vh;
   background: linear-gradient(180deg,
     rgba(28, 28, 42, 0.98) 0%,
@@ -1858,7 +1858,34 @@ body {
 }
 
 .xdx-settings-section {
-  margin-bottom: 22px;
+  margin-bottom: 16px;
+}
+
+.xdx-settings-advanced-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 8px 0;
+  cursor: pointer;
+  color: inherit;
+}
+
+.xdx-settings-advanced-content {
+  padding-top: 8px;
+}
+
+.xdx-settings-subsection {
+  margin-bottom: 14px;
+}
+
+.xdx-settings-about {
+  text-align: center;
+  margin-top: 8px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
 .xdx-settings-dev-signal {
@@ -3828,4 +3855,128 @@ button:active:not(:disabled) {
   padding: 12px;
   background: rgba(255, 255, 255, 0.03);
   border-radius: 10px;
+}
+
+/* Add friend bar */
+.xdx-add-friend-bar {
+  padding: 6px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.xdx-add-friend-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  background: rgba(102, 126, 234, 0.08);
+  border: 1px solid rgba(102, 126, 234, 0.15);
+  border-radius: 8px;
+  color: rgba(102, 126, 234, 0.9);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.xdx-add-friend-btn:hover {
+  background: rgba(102, 126, 234, 0.15);
+  border-color: rgba(102, 126, 234, 0.3);
+}
+
+.xdx-add-friend-form {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.xdx-add-friend-input {
+  flex: 1;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 6px;
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+  font-family: var(--xdx-font);
+}
+
+.xdx-add-friend-input:focus {
+  border-color: rgba(102, 126, 234, 0.4);
+}
+
+.xdx-add-friend-submit,
+.xdx-add-friend-cancel {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.xdx-add-friend-submit {
+  background: rgba(102, 126, 234, 0.2);
+  color: rgba(102, 126, 234, 0.9);
+}
+.xdx-add-friend-submit:hover {
+  background: rgba(102, 126, 234, 0.35);
+}
+
+.xdx-add-friend-cancel {
+  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.4);
+}
+.xdx-add-friend-cancel:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.xdx-action-btn-danger {
+  color: rgba(255, 107, 107, 0.5) !important;
+}
+.xdx-action-btn-danger:hover {
+  color: #ff6b6b !important;
+  background: rgba(255, 107, 107, 0.1) !important;
+}
+
+.xdx-action-btn-add {
+  color: rgba(102, 126, 234, 0.5) !important;
+}
+.xdx-action-btn-add:hover {
+  color: #667eea !important;
+  background: rgba(102, 126, 234, 0.1) !important;
+}
+
+/* Control bar mobile — always visible */
+.xdx-control-bar-mobile {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  z-index: 100;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}
+
+.xdx-local-mode-btn {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px 0;
+  background: none;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.xdx-local-mode-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  border-color: rgba(255, 255, 255, 0.2);
 }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Button, Input, Typography, Toast, Radio, RadioGroup, Avatar } from "@douyinfe/semi-ui";
-import { IconClose, IconUpload } from "@douyinfe/semi-icons";
+import { Button, Input, Typography, Toast, Radio, RadioGroup, Avatar, Collapsible } from "@douyinfe/semi-ui";
+import { IconClose, IconUpload, IconChevronDown } from "@douyinfe/semi-icons";
 import { QRCodeSVG } from "qrcode.react";
 import { useI18n } from "../i18n/index";
 import type {
@@ -51,6 +51,8 @@ interface Props {
   onUiScaleChange: (value: number) => void;
   omiaiDisplayName?: string;
   onLogout?: () => void;
+  localMode?: boolean;
+  onExitLocalMode?: () => void;
 }
 
 const SettingsPanel: React.FC<Props> = ({
@@ -64,6 +66,8 @@ const SettingsPanel: React.FC<Props> = ({
   onUiScaleChange,
   omiaiDisplayName,
   onLogout,
+  localMode,
+  onExitLocalMode,
 }) => {
   const { t } = useI18n();
   const [displayName, setDisplayName] = useState("");
@@ -182,6 +186,8 @@ const SettingsPanel: React.FC<Props> = ({
     e.target.value = "";
   };
 
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
   if (!open) return null;
 
   return (
@@ -197,7 +203,7 @@ const SettingsPanel: React.FC<Props> = ({
         </div>
 
         <div className="xdx-settings-body">
-          {/* Calling Code (read-only) */}
+          {/* Calling Code (compact) */}
           <div className="xdx-settings-section">
             <Text className="xdx-settings-label">{t("settings.callingCode")}</Text>
             <div className="xdx-calling-code-display">
@@ -208,42 +214,6 @@ const SettingsPanel: React.FC<Props> = ({
             </div>
           </div>
 
-          <div className="xdx-settings-section xdx-settings-dev-signal">
-            <Text className="xdx-settings-label">{t("settings.customSignalingServer")}</Text>
-            <Input
-              value={omiaiWsUrl}
-              onChange={(v) => setOmiaiWsUrl(v)}
-              className="xdx-settings-input xdx-settings-input-dev"
-              size="large"
-              placeholder={t("settings.customSignalingServerPlaceholder")}
-            />
-            <Text size="small" className="xdx-settings-dev-signal-hint">
-              {t("settings.customSignalingServerHint")}
-            </Text>
-          </div>
-
-          <div className="xdx-settings-section">
-            <Text className="xdx-settings-label">{t("settings.quicdialQr")}</Text>
-            <div className="xdx-quicdial-qr-card">
-              <div className="xdx-quicdial-qr-image">
-                <QRCodeSVG
-                  value={profile?.callingCode || "unavailable"}
-                  size={148}
-                  bgColor="#ffffff"
-                  fgColor="#111827"
-                  level="M"
-                  includeMargin={true}
-                />
-              </div>
-              <Text className="xdx-quicdial-qr-code">
-                {profile?.callingCode ?? "---"}
-              </Text>
-              <Text size="small" className="xdx-quicdial-qr-hint">
-                {t("settings.quicdialHint")}
-              </Text>
-            </div>
-          </div>
-
           {/* Display Name */}
           <div className="xdx-settings-section">
             <Text className="xdx-settings-label">{t("settings.displayName")}</Text>
@@ -251,7 +221,7 @@ const SettingsPanel: React.FC<Props> = ({
               value={displayName}
               onChange={(v) => setDisplayName(v)}
               className="xdx-settings-input"
-              size="large"
+              size="default"
             />
           </div>
 
@@ -265,27 +235,20 @@ const SettingsPanel: React.FC<Props> = ({
                   className={`xdx-avatar-option ${avatarId === av.id ? "selected" : ""}`}
                   onClick={() => setAvatarId(av.id)}
                 >
-                  <Avatar src={av.src} size="default" />
-                  <Text size="small" style={{ color: "rgba(255,255,255,0.6)" }}>
-                    {av.label}
-                  </Text>
+                  <Avatar src={av.src} size="small" />
                 </button>
               ))}
-              {/* Custom upload option */}
               <button
                 className={`xdx-avatar-option ${avatarId === "custom" ? "selected" : ""}`}
                 onClick={() => fileInputRef.current?.click()}
               >
                 {customAvatarUrl ? (
-                  <Avatar src={customAvatarUrl} size="default" />
+                  <Avatar src={customAvatarUrl} size="small" />
                 ) : (
                   <div className="xdx-avatar-upload-placeholder">
                     <IconUpload style={{ color: "rgba(255,255,255,0.4)" }} />
                   </div>
                 )}
-                <Text size="small" style={{ color: "rgba(255,255,255,0.6)" }}>
-                  {t("settings.uploadAvatar")}
-                </Text>
               </button>
               <input
                 ref={fileInputRef}
@@ -311,30 +274,7 @@ const SettingsPanel: React.FC<Props> = ({
             </RadioGroup>
           </div>
 
-          {/* UI Scale */}
-          <div className="xdx-settings-section">
-            <Text className="xdx-settings-label">{t("settings.uiScale")}</Text>
-            <div className="xdx-scale-control">
-              <input
-                type="range"
-                min={0.9}
-                max={1.2}
-                step={0.02}
-                value={uiScale}
-                className="xdx-scale-slider"
-                onChange={(e) => onUiScaleChange(Number(e.target.value))}
-              />
-              <div className="xdx-scale-row">
-                <Text size="small" style={{ color: "rgba(255,255,255,0.45)" }}>
-                  {t("settings.uiScaleHint")}
-                </Text>
-                <Text className="xdx-scale-value">
-                  {Math.round(uiScale * 100)}%
-                </Text>
-              </div>
-            </div>
-          </div>
-
+          {/* Download Location */}
           <div className="xdx-settings-section">
             <Text className="xdx-settings-label">{t("settings.downloadLocation")}</Text>
             {downloadManaged ? (
@@ -344,51 +284,106 @@ const SettingsPanel: React.FC<Props> = ({
                 value={downloadLocation}
                 onChange={(v) => setDownloadLocation(v)}
                 className="xdx-settings-input"
-                size="large"
+                size="default"
                 placeholder={t("settings.downloadLocationPlaceholder")}
               />
             )}
-            <Text
-              size="small"
-              style={{
-                color: "rgba(255,255,255,0.45)",
-                display: "block",
-                marginTop: 6,
-              }}
-            >
-              {downloadManaged
-                ? t("settings.downloadManagedHint")
-                : t("settings.downloadLocationHint")}
-            </Text>
           </div>
 
-          {/* About */}
-          <div className="xdx-settings-section">
-            <Text className="xdx-settings-label">{t("settings.about")}</Text>
-            <Text size="small" style={{ color: "rgba(255,255,255,0.55)", display: "block" }}>
-              下点心 TREAT v0.1.0
-            </Text>
-            <Text size="small" style={{ color: "rgba(255,255,255,0.35)", display: "block", marginTop: 4 }}>
-              Sankaku/RT · QUIC + Wirehair FEC
-            </Text>
-            <Text
-              size="small"
-              style={{
-                color: "rgba(255,255,255,0.3)",
-                display: "block",
-                marginTop: 10,
-                fontSize: 10,
-                lineHeight: "15px",
-              }}
+          {/* Advanced (collapsible) — QR, signaling server, UI scale */}
+          <div className="xdx-settings-section xdx-settings-advanced">
+            <button
+              className="xdx-settings-advanced-toggle"
+              onClick={() => setAdvancedOpen((o) => !o)}
+              type="button"
             >
-              {t("settings.fontCredit")}
-              {" "}HarmonyOS Sans is a trademark of Huawei Device (Shenzhen) Co., Ltd.
+              <Text className="xdx-settings-label" style={{ margin: 0 }}>
+                {t("settings.advanced")}
+              </Text>
+              <IconChevronDown
+                size="small"
+                style={{
+                  color: "rgba(255,255,255,0.4)",
+                  transform: advancedOpen ? "rotate(180deg)" : "none",
+                  transition: "transform 0.2s ease",
+                }}
+              />
+            </button>
+            <Collapsible isOpen={advancedOpen}>
+              <div className="xdx-settings-advanced-content">
+                {/* UI Scale */}
+                <div className="xdx-settings-subsection">
+                  <Text className="xdx-settings-label">{t("settings.uiScale")}</Text>
+                  <div className="xdx-scale-control">
+                    <input
+                      type="range"
+                      min={0.9}
+                      max={1.2}
+                      step={0.02}
+                      value={uiScale}
+                      className="xdx-scale-slider"
+                      onChange={(e) => onUiScaleChange(Number(e.target.value))}
+                    />
+                    <Text className="xdx-scale-value">{Math.round(uiScale * 100)}%</Text>
+                  </div>
+                </div>
+
+                {/* Quicdial QR */}
+                <div className="xdx-settings-subsection" style={{ textAlign: "center" }}>
+                  <Text className="xdx-settings-label">{t("settings.quicdialQr")}</Text>
+                  <div className="xdx-quicdial-qr-card" style={{ padding: 12 }}>
+                    <div className="xdx-quicdial-qr-image">
+                      <QRCodeSVG
+                        value={profile?.callingCode || "unavailable"}
+                        size={120}
+                        bgColor="#ffffff"
+                        fgColor="#111827"
+                        level="M"
+                        includeMargin={true}
+                      />
+                    </div>
+                    <Text size="small" style={{ color: "rgba(255,255,255,0.45)" }}>
+                      {profile?.callingCode ?? "---"}
+                    </Text>
+                  </div>
+                </div>
+
+                {/* Signaling Server */}
+                <div className="xdx-settings-subsection">
+                  <Text className="xdx-settings-label">{t("settings.customSignalingServer")}</Text>
+                  <Input
+                    value={omiaiWsUrl}
+                    onChange={(v) => setOmiaiWsUrl(v)}
+                    className="xdx-settings-input"
+                    size="default"
+                    placeholder={t("settings.customSignalingServerPlaceholder")}
+                  />
+                  <Text size="small" style={{ color: "rgba(255,255,255,0.3)", marginTop: 4 }}>
+                    {t("settings.customSignalingServerHint")}
+                  </Text>
+                </div>
+              </div>
+            </Collapsible>
+          </div>
+
+          {/* About (compact) */}
+          <div className="xdx-settings-section xdx-settings-about">
+            <Text size="small" style={{ color: "rgba(255,255,255,0.4)" }}>
+              下点心 TREAT v0.1.0 · Sankaku/RT
             </Text>
           </div>
         </div>
 
         <div className="xdx-settings-footer">
-          {onLogout && (
+          {localMode && onExitLocalMode ? (
+            <Button
+              theme="borderless"
+              style={{ color: "#667eea", marginRight: "auto" }}
+              onClick={onExitLocalMode}
+            >
+              {t("auth.signIn")}
+            </Button>
+          ) : onLogout ? (
             <Button
               theme="borderless"
               style={{ color: "#ff6b6b", marginRight: "auto" }}
@@ -397,7 +392,7 @@ const SettingsPanel: React.FC<Props> = ({
               {t("auth.logoutBtn")}
               {omiaiDisplayName ? ` (${omiaiDisplayName})` : ""}
             </Button>
-          )}
+          ) : null}
           <Button theme="borderless" style={{ color: "rgba(255,255,255,0.5)" }} onClick={onClose}>
             {t("settings.cancel")}
           </Button>
