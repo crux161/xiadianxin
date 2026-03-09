@@ -2,7 +2,11 @@ import React, { useState, useCallback } from "react";
 import { Button, Input, Typography, Toast, Avatar } from "@douyinfe/semi-ui";
 import { IconCopy } from "@douyinfe/semi-icons";
 import { useI18n } from "../i18n/index";
-import SankakuBridge, { OMIAI_AUTH_TOKEN_KEY } from "../services/SankakuBridge";
+import SankakuBridge, {
+  OMIAI_WS_URL_STORAGE_KEY,
+  OMIAI_WS_URL_CHANGED_EVENT,
+  normalizeServerHostToWsUrl,
+} from "../services/SankakuBridge";
 import type { OmiaiUser } from "../types/call";
 
 import foxImg from "../../reference/images/kyu-kun/fox.jpg";
@@ -13,6 +17,8 @@ import kenRedImg from "../../reference/images/ken-chan/koken-CNY-red.jpeg";
 import pentaroImg from "../../reference/images/pentaro-san/OIG2.AB3fp4AoIltcenw1pKtq.jpeg";
 
 const { Title, Text } = Typography;
+
+const CONNECTION_TIMEOUT_MS = 5000;
 
 const SIGNUP_AVATARS = [
   { id: "kyu-kun", src: foxImg },
@@ -25,19 +31,25 @@ const SIGNUP_AVATARS = [
 
 interface Props {
   callingCode: string;
+  rememberedDisplayName?: string;
+  rememberedAvatarId?: string;
+  rememberedServerHost?: string;
   onAuthenticated: (user: OmiaiUser, token: string) => void;
   onLocalMode?: () => void;
 }
 
-const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMode }) => {
+const LoginScreen: React.FC<Props> = ({ callingCode, rememberedDisplayName, rememberedAvatarId, rememberedServerHost, onAuthenticated, onLocalMode }) => {
   const { t } = useI18n();
   const bridge = SankakuBridge.getInstance();
 
   const [mode, setMode] = useState<"login" | "signup">("login");
 
-  // Login fields
-  const [loginQuicdialId, setLoginQuicdialId] = useState(callingCode);
+  // Login fields — pre-fill with remembered identity if available
+  const [loginQuicdialId, setLoginQuicdialId] = useState(callingCode || "");
   const [loginPassword, setLoginPassword] = useState("");
+
+  // Server host — pre-fill from persisted identity
+  const [serverHost, setServerHost] = useState(rememberedServerHost || "");
 
   // Signup fields (no quicdial — server generates it)
   const [displayName, setDisplayName] = useState("");
@@ -50,7 +62,38 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMod
   const [pendingToken, setPendingToken] = useState<string | null>(null);
   const [codeCopied, setCodeCopied] = useState(false);
 
-  const [loading, setLoading] = useState(false);
+  // Granular status message replaces boolean loading
+  const [statusMessage, setStatusMessage] = useState("");
+
+  const isLoading = statusMessage !== "";
+
+  // -------------------------------------------------------------------------
+  // Apply server host override to bridge before API calls
+  // -------------------------------------------------------------------------
+  const applyServerHost = useCallback(() => {
+    const trimmed = serverHost.trim();
+    if (trimmed) {
+      const wsUrl = normalizeServerHostToWsUrl(trimmed);
+      window.localStorage.setItem(OMIAI_WS_URL_STORAGE_KEY, wsUrl);
+    } else {
+      window.localStorage.removeItem(OMIAI_WS_URL_STORAGE_KEY);
+    }
+    window.dispatchEvent(new Event(OMIAI_WS_URL_CHANGED_EVENT));
+  }, [serverHost]);
+
+  // -------------------------------------------------------------------------
+  // Timeout-wrapped fetch helper
+  // -------------------------------------------------------------------------
+  const withTimeout = useCallback(<T,>(promise: Promise<T>): Promise<T> => {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error("CONNECTION_TIMEOUT"));
+      }, CONNECTION_TIMEOUT_MS);
+      promise
+        .then((v) => { clearTimeout(timer); resolve(v); })
+        .catch((e) => { clearTimeout(timer); reject(e); });
+    });
+  }, []);
 
   // -------------------------------------------------------------------------
   // Login
@@ -60,23 +103,33 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMod
       Toast.warning({ content: t("auth.fillRequired") });
       return;
     }
-    setLoading(true);
+    applyServerHost();
+    setStatusMessage(t("auth.statusConnecting"));
     try {
-      const result = await bridge.login({
-        quicdialId: loginQuicdialId.trim(),
-        password: loginPassword.trim(),
-      });
+      setStatusMessage(t("auth.statusAuthenticating"));
+      const result = await withTimeout(
+        bridge.login({
+          quicdialId: loginQuicdialId.trim(),
+          password: loginPassword.trim(),
+        }),
+      );
       bridge.authToken = result.token;
-      window.localStorage.setItem(OMIAI_AUTH_TOKEN_KEY, result.token);
+      setStatusMessage(t("auth.statusConnected"));
+      // Auth token is NOT persisted to disk — kept in memory only.
+      // Device identity (quicdial_id, display_name, server_host) is persisted by handleAuthenticated.
       onAuthenticated(result.user, result.token);
       Toast.success({ content: t("auth.loginSuccess") });
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Login failed";
-      Toast.error({ content: msg });
+      if (err instanceof Error && err.message === "CONNECTION_TIMEOUT") {
+        Toast.error({ content: t("auth.connectionTimeout") });
+      } else {
+        const msg = err instanceof Error ? err.message : "Login failed";
+        Toast.error({ content: msg });
+      }
     } finally {
-      setLoading(false);
+      setStatusMessage("");
     }
-  }, [bridge, loginQuicdialId, loginPassword, onAuthenticated, t]);
+  }, [bridge, loginQuicdialId, loginPassword, serverHost, onAuthenticated, t, applyServerHost, withTimeout]);
 
   // -------------------------------------------------------------------------
   // Signup — server auto-generates quicdial code
@@ -94,24 +147,32 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMod
       Toast.warning({ content: t("auth.passwordTooShort") });
       return;
     }
-    setLoading(true);
+    applyServerHost();
+    setStatusMessage(t("auth.statusConnecting"));
     try {
-      const result = await bridge.signup({
-        quicdialId: "", // empty → server generates
-        displayName: displayName.trim(),
-        password: signupPassword.trim(),
-        avatarId,
-      });
+      setStatusMessage(t("auth.statusAuthenticating"));
+      const result = await withTimeout(
+        bridge.signup({
+          quicdialId: "", // empty → server generates
+          displayName: displayName.trim(),
+          password: signupPassword.trim(),
+          avatarId,
+        }),
+      );
       // Don't finalise yet — show the assigned code for user approval
       setPendingUser(result.user);
       setPendingToken(result.token);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Signup failed";
-      Toast.error({ content: msg });
+      if (err instanceof Error && err.message === "CONNECTION_TIMEOUT") {
+        Toast.error({ content: t("auth.connectionTimeout") });
+      } else {
+        const msg = err instanceof Error ? err.message : "Signup failed";
+        Toast.error({ content: msg });
+      }
     } finally {
-      setLoading(false);
+      setStatusMessage("");
     }
-  }, [bridge, displayName, signupPassword, confirmPassword, avatarId, t]);
+  }, [bridge, displayName, signupPassword, confirmPassword, avatarId, serverHost, t, applyServerHost, withTimeout]);
 
   // -------------------------------------------------------------------------
   // Code approval — user confirms and enters the app
@@ -119,7 +180,6 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMod
   const handleApproveCode = useCallback(() => {
     if (!pendingUser || !pendingToken) return;
     bridge.authToken = pendingToken;
-    window.localStorage.setItem(OMIAI_AUTH_TOKEN_KEY, pendingToken);
     onAuthenticated(pendingUser, pendingToken);
     Toast.success({ content: t("auth.signupSuccess") });
   }, [bridge, pendingUser, pendingToken, onAuthenticated, t]);
@@ -220,15 +280,43 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMod
     <div className="xdx-login-screen">
       <div className="xdx-login-card">
         <div className="xdx-login-header">
-          <Title heading={3} style={{ color: "#fff", margin: 0 }}>
-            TREAT
-          </Title>
-          <Text
-            size="small"
-            style={{ color: "rgba(255,255,255,0.5)", marginTop: 4 }}
-          >
-            {t("app.nameCn")} · {t("app.subtitle")}
-          </Text>
+          {rememberedDisplayName ? (
+            <>
+              <Avatar
+                size="default"
+                src={rememberedAvatarId
+                  ? SIGNUP_AVATARS.find((a) => a.id === rememberedAvatarId)?.src
+                  : undefined}
+                style={{
+                  background: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
+                  marginBottom: 8,
+                }}
+              >
+                {rememberedDisplayName.charAt(0)}
+              </Avatar>
+              <Title heading={4} style={{ color: "#fff", margin: 0 }}>
+                {rememberedDisplayName}
+              </Title>
+              <Text
+                size="small"
+                style={{ color: "rgba(255,255,255,0.5)", marginTop: 4 }}
+              >
+                {callingCode || t("app.subtitle")}
+              </Text>
+            </>
+          ) : (
+            <>
+              <Title heading={3} style={{ color: "#fff", margin: 0 }}>
+                TREAT
+              </Title>
+              <Text
+                size="small"
+                style={{ color: "rgba(255,255,255,0.5)", marginTop: 4 }}
+              >
+                {t("app.nameCn")} · {t("app.subtitle")}
+              </Text>
+            </>
+          )}
         </div>
 
         <div className="xdx-login-tabs">
@@ -324,13 +412,25 @@ const LoginScreen: React.FC<Props> = ({ callingCode, onAuthenticated, onLocalMod
             </>
           )}
 
+          {/* ---- SERVER HOST (shared between login & signup) ---- */}
+          <label className="xdx-login-label" style={{ marginTop: 12 }}>
+            {t("auth.serverHost")}
+          </label>
+          <Input
+            value={serverHost}
+            onChange={(v) => setServerHost(v)}
+            placeholder={t("auth.serverHostPlaceholder")}
+            className="xdx-login-input"
+            size="small"
+          />
+
           <Button
             className="xdx-btn-save xdx-login-submit"
-            loading={loading}
+            loading={isLoading}
             onClick={mode === "login" ? handleLogin : handleSignup}
             block
           >
-            {mode === "login" ? t("auth.loginBtn") : t("auth.signupBtn")}
+            {statusMessage || (mode === "login" ? t("auth.loginBtn") : t("auth.signupBtn"))}
           </Button>
         </div>
 

@@ -162,6 +162,27 @@ pub struct OmiaiDiscoveryResult {
     pub instance_name: String,
 }
 
+/// Hardware-bound device identity — persisted to `device_identity.json`.
+/// Survives app restarts, logouts, and credential clears.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceIdentity {
+    /// Stable UUIDv4, generated once on first boot, never changes.
+    pub device_uuid: String,
+    /// The user's server-assigned QuicDial ID (persists across logouts).
+    #[serde(default)]
+    pub quicdial_id: Option<String>,
+    /// The user's display name (persists across logouts).
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The user's avatar identifier (persists across logouts).
+    #[serde(default)]
+    pub avatar_id: Option<String>,
+    /// Custom Omiai server host (persists across sessions).
+    #[serde(default)]
+    pub server_host: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // Internal state
 // ---------------------------------------------------------------------------
@@ -178,6 +199,7 @@ struct AppState {
     core_state: CoreState,
     profile: UserProfile,
     profile_path: PathBuf,
+    identity_path: PathBuf,
     friends_path: PathBuf,
     conversations_dir: PathBuf,
     received_files_dir: PathBuf,
@@ -246,6 +268,49 @@ fn save_profile(path: &PathBuf, profile: &UserProfile) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let json = serde_json::to_string_pretty(profile).map_err(|e| e.to_string())?;
+    fs::write(path, json).map_err(|e| e.to_string())
+}
+
+fn generate_device_uuid() -> String {
+    let mut rng = rand::thread_rng();
+    let bytes: [u8; 16] = rng.gen();
+    // RFC 4122 UUIDv4: set version (4) and variant (10xx) bits
+    let b6 = (bytes[6] & 0x0f) | 0x40;
+    let b8 = (bytes[8] & 0x3f) | 0x80;
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3],
+        bytes[4], bytes[5],
+        b6, bytes[7],
+        b8, bytes[9],
+        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+    )
+}
+
+fn load_device_identity(path: &PathBuf) -> DeviceIdentity {
+    match fs::read_to_string(path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_else(|_| DeviceIdentity {
+            device_uuid: generate_device_uuid(),
+            quicdial_id: None,
+            display_name: None,
+            avatar_id: None,
+            server_host: None,
+        }),
+        Err(_) => DeviceIdentity {
+            device_uuid: generate_device_uuid(),
+            quicdial_id: None,
+            display_name: None,
+            avatar_id: None,
+            server_host: None,
+        },
+    }
+}
+
+fn save_device_identity(path: &PathBuf, identity: &DeviceIdentity) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(identity).map_err(|e| e.to_string())?;
     fs::write(path, json).map_err(|e| e.to_string())
 }
 
@@ -825,6 +890,48 @@ fn init_sankaku_core(state: tauri::State<'_, Arc<Mutex<AppState>>>) -> Result<Ca
         message: "Sankaku/RT core initialised".into(),
         session_id: None,
     })
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn get_device_identity(
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<DeviceIdentity, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    let identity = load_device_identity(&s.identity_path);
+    Ok(identity)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn save_device_identity_cmd(
+    device_uuid: Option<String>,
+    quicdial_id: Option<String>,
+    display_name: Option<String>,
+    avatar_id: Option<String>,
+    server_host: Option<String>,
+    state: tauri::State<'_, Arc<Mutex<AppState>>>,
+) -> Result<DeviceIdentity, String> {
+    let s = state.lock().map_err(|e| e.to_string())?;
+    let mut identity = load_device_identity(&s.identity_path);
+    // device_uuid is immutable after first generation — only set if currently empty
+    if let Some(uuid) = device_uuid {
+        if identity.device_uuid.is_empty() {
+            identity.device_uuid = uuid;
+        }
+    }
+    if let Some(qid) = quicdial_id {
+        identity.quicdial_id = Some(qid);
+    }
+    if let Some(name) = display_name {
+        identity.display_name = Some(name);
+    }
+    if let Some(avatar) = avatar_id {
+        identity.avatar_id = Some(avatar);
+    }
+    if let Some(host) = server_host {
+        identity.server_host = if host.trim().is_empty() { None } else { Some(host) };
+    }
+    save_device_identity(&s.identity_path, &identity)?;
+    Ok(identity)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1631,6 +1738,7 @@ pub fn run() {
         .setup(|app| {
             let data_dir = profile_dir(app);
             let profile_path = data_dir.join("profile.json");
+            let identity_path = data_dir.join("device_identity.json");
             let friends_path = data_dir.join("friends.json");
             let conversations_dir = data_dir.join("conversations");
             let download_dir_config_path = data_dir.join("download_directory.txt");
@@ -1638,6 +1746,10 @@ pub fn run() {
                 resolve_effective_download_directory(app, &data_dir, &download_dir_config_path);
             let profile = load_profile(&profile_path);
             save_profile(&profile_path, &profile).ok();
+
+            // Ensure device identity file exists with a stable UUID from first boot
+            let identity = load_device_identity(&identity_path);
+            save_device_identity(&identity_path, &identity).ok();
             fs::create_dir_all(&conversations_dir).ok();
             fs::create_dir_all(&received_files_dir).ok();
             if load_download_directory(&download_dir_config_path).is_none() {
@@ -1663,6 +1775,7 @@ pub fn run() {
                 core_state: CoreState::Uninitialized,
                 profile,
                 profile_path,
+                identity_path,
                 friends_path,
                 conversations_dir,
                 received_files_dir,
@@ -1686,6 +1799,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             init_sankaku_core,
+            get_device_identity,
+            save_device_identity_cmd,
             get_profile,
             update_profile,
             get_discovered_peers,

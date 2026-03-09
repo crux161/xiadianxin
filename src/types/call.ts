@@ -173,6 +173,14 @@ export interface PresencePeer {
   onlineAt?: number;
 }
 
+export interface DeviceIdentity {
+  deviceUuid: string;
+  quicdialId: string | null;
+  displayName: string | null;
+  avatarId: string | null;
+  serverHost: string | null;
+}
+
 // ---------------------------------------------------------------------------
 // Signal messages (P2P)
 // ---------------------------------------------------------------------------

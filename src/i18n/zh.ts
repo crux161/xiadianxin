@@ -222,6 +222,12 @@ const zh: TranslationMap = {
     addFriendPlaceholder: "输入 Quicdial ID",
     addFriendBtn: "发送请求",
     removeFriendConfirm: "确定删除此好友？",
+    serverHost: "服务器地址",
+    serverHostPlaceholder: "IP 或主机名（默认：localhost）",
+    statusConnecting: "正在连接服务器…",
+    statusAuthenticating: "正在验证身份…",
+    statusConnected: "已连接",
+    connectionTimeout: "连接超时，请检查服务器地址后重试。",
   },
   friends: {
     title: "好友",

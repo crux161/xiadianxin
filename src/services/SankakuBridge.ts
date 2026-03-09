@@ -3,6 +3,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Socket } from "phoenix";
 import type {
   CallResult,
+  DeviceIdentity,
   DiscoveredPeer,
   DownloadDirectoryInfo,
   DownloadedFileEntry,
@@ -64,6 +65,49 @@ export const OMIAI_WS_URL_STORAGE_KEY = "OMIAI_WS_URL";
 export const OMIAI_WS_URL_CHANGED_EVENT = "xdx-omiai-ws-url-changed";
 export const DEFAULT_OMIAI_WS_URL =
   "ws://localhost:4000/ws/sankaku/websocket";
+
+/**
+ * Converts raw user input (IP, hostname, or full URL) into a Phoenix WebSocket URL.
+ *
+ * Examples:
+ *   "192.168.1.5"          → "ws://192.168.1.5:4000/ws/sankaku/websocket"
+ *   "myserver.com"         → "ws://myserver.com:4000/ws/sankaku/websocket"
+ *   "myserver.com:8080"    → "ws://myserver.com:8080/ws/sankaku/websocket"
+ *   "::1"                  → "ws://[::1]:4000/ws/sankaku/websocket"
+ *   "ws://host:4000/ws/…" → returned as-is (already valid)
+ */
+export function normalizeServerHostToWsUrl(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return DEFAULT_OMIAI_WS_URL;
+  }
+
+  // Already a full ws(s):// URL — return with /websocket suffix ensured
+  if (/^wss?:\/\//i.test(trimmed)) {
+    const withPath = trimmed.replace(/\/+$/, "");
+    if (/\/ws\/sankaku(\/websocket)?$/i.test(withPath)) {
+      return withPath.replace(/\/websocket$/i, "") + "/websocket";
+    }
+    return withPath + "/ws/sankaku/websocket";
+  }
+
+  // Detect bare IPv6 (contains colons but no brackets and no port separator pattern like ]:)
+  const isIPv6 = trimmed.includes(":") && !trimmed.startsWith("[") && !/^\[/.test(trimmed);
+  // But not if it looks like host:port (single colon with a short numeric suffix)
+  const singleColonPort = /^[^:]+:\d{1,5}$/.test(trimmed);
+
+  if (isIPv6 && !singleColonPort) {
+    return `ws://[${trimmed}]:4000/ws/sankaku/websocket`;
+  }
+
+  // host:port or [ipv6]:port
+  if (/:\d{1,5}$/.test(trimmed)) {
+    return `ws://${trimmed}/ws/sankaku/websocket`;
+  }
+
+  // Bare hostname or IPv4
+  return `ws://${trimmed}:4000/ws/sankaku/websocket`;
+}
 
 interface QuicdialResolveResult {
   ip: string;
@@ -129,17 +173,13 @@ class SankakuBridge {
         OMIAI_WS_URL_CHANGED_EVENT,
         this.handleOmiaiUrlChanged as EventListener,
       );
-      // Persist a stable device UUID in localStorage
-      const stored = window.localStorage.getItem("OMIAI_DEVICE_UUID");
-      if (stored) {
-        this.deviceUuid = stored;
-      } else {
-        this.deviceUuid =
-          typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
-        window.localStorage.setItem("OMIAI_DEVICE_UUID", this.deviceUuid);
-      }
+      // Device UUID is loaded from Tauri disk store in initialize().
+      // Use a temporary fallback for the rare case something accesses
+      // deviceUuid before initialize() completes.
+      this.deviceUuid =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2, 14)}`;
     }
   }
 
@@ -367,6 +407,7 @@ class SankakuBridge {
 
   logout(): void {
     this.authToken = null;
+    // Clean up any legacy localStorage token from prior versions
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(OMIAI_AUTH_TOKEN_KEY);
     }
@@ -512,6 +553,14 @@ class SankakuBridge {
   async initialize(): Promise<CallResult> {
     if (this.ready) {
       return { success: true, message: "Already initialised", sessionId: null };
+    }
+
+    // Hydrate device UUID from persistent Tauri disk store
+    try {
+      const identity = await this.getDeviceIdentity();
+      this.deviceUuid = identity.deviceUuid;
+    } catch (err) {
+      console.warn("[Bridge] Failed to load device identity from disk; using ephemeral UUID", err);
     }
 
     const u1 = await listen<IncomingCallPayload>("incoming-call", (e) => {
@@ -714,6 +763,24 @@ class SankakuBridge {
         (h) => h !== handler,
       );
     };
+  }
+
+  // -----------------------------------------------------------------------
+  // Device Identity (hardware-bound, persistent on disk)
+  // -----------------------------------------------------------------------
+
+  async getDeviceIdentity(): Promise<DeviceIdentity> {
+    return invoke<DeviceIdentity>("get_device_identity");
+  }
+
+  async saveDeviceIdentity(fields: {
+    deviceUuid?: string;
+    quicdialId?: string;
+    displayName?: string;
+    avatarId?: string;
+    serverHost?: string;
+  }): Promise<DeviceIdentity> {
+    return invoke<DeviceIdentity>("save_device_identity_cmd", fields);
   }
 
   // -----------------------------------------------------------------------
@@ -1271,7 +1338,7 @@ class SankakuBridge {
     });
   }
 
-  private async ensureOmiaiChannel(): Promise<any> {
+  async ensureOmiaiChannel(): Promise<any> {
     const endpoint = await this.resolveOmiaiEndpoint();
     if (this.omiaiEndpoint && this.omiaiEndpoint !== endpoint) {
       this.resetOmiaiSocket();

@@ -25,7 +25,7 @@ import {
 } from "@douyinfe/semi-icons";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { I18nProvider, useI18n } from "./i18n/index";
-import SankakuBridge, { OMIAI_AUTH_TOKEN_KEY } from "./services/SankakuBridge";
+import SankakuBridge from "./services/SankakuBridge";
 import { WebRTCService } from "./services/WebRTCService";
 import {
   decodeKyu2Packet,
@@ -49,6 +49,7 @@ import {
   type ActiveCallInfo,
   type ChatMessage,
   type CallNetworkMetrics,
+  type DeviceIdentity,
   type DownloadDirectoryInfo,
   type DiscoveredPeer,
   type DownloadedFileEntry,
@@ -367,6 +368,8 @@ const AppInner: React.FC = () => {
   const [localMode, setLocalMode] = useState(false);
   const [addFriendDialogOpen, setAddFriendDialogOpen] = useState(false);
   const [addFriendCode, setAddFriendCode] = useState("");
+  // Hardware-bound identity: persisted on disk, survives logouts
+  const [rememberedIdentity, setRememberedIdentity] = useState<DeviceIdentity | null>(null);
 
   useEffect(() => {
     fileTransfersRef.current = fileTransfers;
@@ -506,31 +509,23 @@ const AppInner: React.FC = () => {
       });
   }, []);
 
-  // Check for stored Omiai auth token on mount
+  // Hydrate remembered identity from Tauri disk store on mount.
+  // Auth token is NOT persisted — user must re-authenticate each session,
+  // but their quicdial_id and display_name are remembered.
   useEffect(() => {
-    const storedToken = window.localStorage.getItem(OMIAI_AUTH_TOKEN_KEY);
-    if (storedToken) {
-      bridge.current.authToken = storedToken;
-      bridge.current
-        .fetchMe()
-        .then((user) => {
-          if (user) {
-            setOmiaiUser(user);
-            setOmiaiLoggedIn(true);
-          } else {
-            // Token expired / invalid
-            window.localStorage.removeItem(OMIAI_AUTH_TOKEN_KEY);
-            bridge.current.authToken = null;
-          }
-        })
-        .catch(() => {
-          window.localStorage.removeItem(OMIAI_AUTH_TOKEN_KEY);
-          bridge.current.authToken = null;
-        })
-        .finally(() => setCheckingAuth(false));
-    } else {
-      setCheckingAuth(false);
-    }
+    bridge.current
+      .getDeviceIdentity()
+      .then((identity) => {
+        setRememberedIdentity(identity);
+        // Hydrate localStorage with persisted server host so bridge picks it up
+        if (identity.serverHost) {
+          window.localStorage.setItem("OMIAI_WS_URL", identity.serverHost);
+        }
+      })
+      .catch((err) => {
+        console.warn("[XDX] Failed to load device identity", err);
+      })
+      .finally(() => setCheckingAuth(false));
   }, []);
 
   // Subscribe to Omiai presence updates
@@ -545,6 +540,22 @@ const AppInner: React.FC = () => {
     setOmiaiUser(user);
     setOmiaiLoggedIn(true);
     bridge.current.authToken = token;
+    // Persist user identity + server host to disk (survives logouts and restarts)
+    const currentServerHost =
+      window.localStorage.getItem("OMIAI_WS_URL") || undefined;
+    bridge.current
+      .saveDeviceIdentity({
+        quicdialId: user.quicdialId,
+        displayName: user.displayName,
+        avatarId: user.avatarId,
+        serverHost: currentServerHost,
+      })
+      .then((identity) => setRememberedIdentity(identity))
+      .catch((err) => console.warn("[XDX] Failed to persist identity", err));
+    // Establish Omiai WebSocket + lobby channel for real-time presence tracking
+    bridge.current.ensureOmiaiChannel().catch((err) => {
+      console.warn("[XDX] Omiai channel setup after login failed", err);
+    });
   }, []);
 
   const handleLogout = useCallback(() => {
@@ -2305,30 +2316,47 @@ const AppInner: React.FC = () => {
     };
   }, [callState]);
 
-  // Merge peers: When logged in, show only Omiai presence peers.
-  // In local mode (not logged in), show mDNS-discovered peers.
+  // Merge peers using a Map keyed by callingCode (QuicDial ID) for deduplication.
+  // Local mode (not logged in): show only mDNS-discovered peers.
+  // Signed-in mode: show only Omiai presence peers, augmented with mDNS routing
+  // data (IP/port) when available for direct connectivity.
   const mergedPeers: DiscoveredPeer[] = (() => {
+    const peerMap = new Map<string, DiscoveredPeer>();
+
     if (!omiaiLoggedIn) {
-      // Local mode — mDNS only
-      return peers;
-    }
-    // Logged in — Omiai presence peers, augmented with mDNS data when available
-    const mdnsMap = new Map(peers.map((p) => [p.callingCode, p]));
-    const result: DiscoveredPeer[] = [];
-    for (const op of omiaiPresencePeers) {
-      const mdnsPeer = mdnsMap.get(op.quicdialId);
-      if (mdnsPeer) {
-        result.push(mdnsPeer); // prefer mDNS peer (has IP/port)
-      } else {
-        result.push({
-          callingCode: op.quicdialId,
-          displayName: op.displayName,
-          addresses: op.ip ? [op.ip] : [],
-          port: 0,
-        });
+      // Local mode — mDNS only, no server peers
+      for (const p of peers) {
+        peerMap.set(p.callingCode, p);
+      }
+    } else {
+      // Signed-in mode — Omiai presence is the source of truth for who is online.
+      // mDNS data is only used to enrich routing info (IP/port) for direct connections.
+      const mdnsMap = new Map(peers.map((p) => [p.callingCode, p]));
+      for (const op of omiaiPresencePeers) {
+        const mdnsPeer = mdnsMap.get(op.quicdialId);
+        if (mdnsPeer) {
+          // Merge: use mDNS routing data with Omiai display/avatar info
+          peerMap.set(op.quicdialId, {
+            callingCode: op.quicdialId,
+            displayName: op.displayName || mdnsPeer.displayName,
+            addresses: mdnsPeer.addresses.length > 0
+              ? mdnsPeer.addresses
+              : op.ip ? [op.ip] : [],
+            port: mdnsPeer.port,
+          });
+        } else {
+          // Online via server only — no local routing data
+          peerMap.set(op.quicdialId, {
+            callingCode: op.quicdialId,
+            displayName: op.displayName,
+            addresses: op.ip ? [op.ip] : [],
+            port: 0,
+          });
+        }
       }
     }
-    return result;
+
+    return Array.from(peerMap.values());
   })();
 
   const friendCodeSet = new Set(friends.map((f) => f.callingCode));
@@ -3014,7 +3042,10 @@ const AppInner: React.FC = () => {
   if (!omiaiLoggedIn && !localMode) {
     return (
       <LoginScreen
-        callingCode={profile?.callingCode || ""}
+        callingCode={rememberedIdentity?.quicdialId || profile?.callingCode || ""}
+        rememberedDisplayName={rememberedIdentity?.displayName || undefined}
+        rememberedAvatarId={rememberedIdentity?.avatarId || undefined}
+        rememberedServerHost={rememberedIdentity?.serverHost || undefined}
         onAuthenticated={handleAuthenticated}
         onLocalMode={handleEnterLocalMode}
       />

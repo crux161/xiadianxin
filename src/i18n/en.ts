@@ -223,6 +223,12 @@ const en = {
     addFriendPlaceholder: "Enter Quicdial ID",
     addFriendBtn: "Send Request",
     removeFriendConfirm: "Remove this friend?",
+    serverHost: "Server Host",
+    serverHostPlaceholder: "IP or hostname (default: localhost)",
+    statusConnecting: "Connecting to server…",
+    statusAuthenticating: "Authenticating…",
+    statusConnected: "Connected",
+    connectionTimeout: "Connection timed out. Check the server address and try again.",
   },
   friends: {
     title: "Friends",
